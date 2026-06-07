@@ -200,7 +200,7 @@ Commands:
   tokenopt mcp
   tokenopt benchmark daily --repo <path> [--mode all]
   tokenopt benchmark codex-daily --repo <path> [--mode all]
-  tokenopt benchmark suite --suite <json> --repo <path> [--mode baseline,mcp-first]
+  tokenopt benchmark suite --suite <json> --repo <path> [--mode baseline,mcp-first|router-best]
   tokenopt instructions audit
   tokenopt instructions emit --target agents|codex|copilot
   tokenopt instructions install --target agents|codex|copilot

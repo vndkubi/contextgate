@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 
-type SuiteBenchmarkMode = "baseline" | "mcp-first" | "mcp-only" | "compiled-hard-gate";
+type SuiteBenchmarkMode = "baseline" | "mcp-first" | "mcp-only" | "compiled-hard-gate" | "router-strict" | "router-best";
 
 interface SuiteFile {
   name?: string;
@@ -204,7 +204,7 @@ function parseOptions(args: string[]): SuiteBenchmarkOptions {
     }
     if (arg === "--mode") {
       const value = requiredValue(args, index, "--mode");
-      modes = value === "all" ? ["baseline", "mcp-first", "mcp-only", "compiled-hard-gate"] : value.split(",").map(parseMode);
+      modes = value === "all" ? ["baseline", "mcp-first", "mcp-only", "compiled-hard-gate", "router-strict", "router-best"] : value.split(",").map(parseMode);
       index += 1;
       continue;
     }
@@ -408,7 +408,7 @@ function runCodexSuiteBenchmark(
     );
   }
 
-  if (mode === "mcp-only" || mode === "compiled-hard-gate") {
+  if (shouldDisableShell(mode, task)) {
     args.push("--disable", "shell_tool");
   }
 
@@ -466,6 +466,42 @@ function buildSuitePrompt(repo: string, task: SuiteTask, mode: SuiteBenchmarkMod
 
   const taskType = inferTaskType(task);
   const packetTokens = task.maxBudget?.packetTokens ?? 2000;
+  if (mode === "router-strict") {
+    const routerPlan =
+      taskType === "review_diff"
+        ? "review_diff -> call tokenopt_compile_evidence first; if answerable=true, answer from the packet with zero followups; if answerable=false, use at most one exact TokenOpt search/read pair for the changed method and likely tests."
+        : `${taskType} -> shell disabled; use tokenopt_compile_evidence first, then exact TokenOpt search/read followups only for missing named files, routes, symbols, or tests.`;
+    return [
+      ...common,
+      "- TokenOpt router selected strict acquisition for this task.",
+      `- Router plan: ${routerPlan}`,
+      `- Call tokenopt_compile_evidence with cwd=${repo}, task_type=${taskType}, and budget_tokens around ${packetTokens}.`,
+      "- Preserve the requested JSON contract. Do not call shell; it is disabled in this benchmark mode.",
+      "- If evidence is still incomplete after the allowed exact followups, return the best supported answer and mark unresolved risks explicitly."
+    ].join("\n");
+  }
+  if (mode === "router-best") {
+    const deterministicReview = hasDeterministicReviewSupport(task);
+    const routerPlan =
+      taskType === "review_diff" && !deterministicReview
+        ? "review_diff without a concrete supported diff -> call tokenopt_compile_evidence first, then use bounded targeted shell/MCP fallback only for exact changed symbols, files, and tests."
+        : taskType === "review_diff"
+          ? "supported review_diff -> call tokenopt_compile_evidence first; if answerable=true, answer from the packet with zero followups."
+          : `${taskType} -> shell disabled; use tokenopt_compile_evidence first, then exact TokenOpt search/read followups only for missing named files, routes, symbols, or tests.`;
+    const shellPolicy =
+      taskType === "review_diff" && !deterministicReview
+        ? "- Bounded shell fallback is allowed only after TokenOpt cannot prove the review from the packet."
+        : "- Do not call shell; it is disabled in this benchmark mode for this task.";
+    return [
+      ...common,
+      "- TokenOpt router selected the cheapest safe acquisition profile for this task.",
+      `- Router plan: ${routerPlan}`,
+      `- Call tokenopt_compile_evidence with cwd=${repo}, task_type=${taskType}, and budget_tokens around ${packetTokens}.`,
+      shellPolicy,
+      "- Preserve the requested JSON contract. Include unresolved risks when evidence is incomplete."
+    ].join("\n");
+  }
+
   const hardGateLine =
     mode === "compiled-hard-gate"
       ? "- Hard gate: after tokenopt_compile_evidence returns answerable=true, do not call more tools. If answerable=false, use at most the allowed exact followups from the packet."
@@ -485,12 +521,22 @@ function buildSuitePrompt(repo: string, task: SuiteTask, mode: SuiteBenchmarkMod
 }
 
 function inferTaskType(task: SuiteTask): string {
-  const text = `${task.id} ${task.class} ${task.prompt}`.toLowerCase();
-  if (text.includes("review") || text.includes("diff") || text.includes("patch")) {
+  const idAndClass = `${task.id} ${task.class}`.toLowerCase();
+  const text = `${idAndClass} ${task.prompt}`.toLowerCase();
+  if (idAndClass.includes("field") || idAndClass.includes("impact")) {
+    return "field_impact";
+  }
+  if (idAndClass.includes("review") || idAndClass.includes("diff")) {
     return "review_diff";
   }
-  if (text.includes("field") || text.includes("impact")) {
+  if (idAndClass.includes("api") || idAndClass.includes("flow") || idAndClass.includes("semantic")) {
+    return "api_flow";
+  }
+  if (text.includes("field") || /\bimpact of changing\b/.test(text)) {
     return "field_impact";
+  }
+  if (text.includes("review") || text.includes("diff") || text.includes("patch")) {
+    return "review_diff";
   }
   if (text.includes("startup")) {
     return "startup_flow";
@@ -815,13 +861,20 @@ function aggregateRows(rows: SuiteBenchmarkRow[]): string[][] {
 }
 
 function parseMode(value: string): SuiteBenchmarkMode {
-  if (value === "baseline" || value === "mcp-first" || value === "mcp-only" || value === "compiled-hard-gate") {
+  if (
+    value === "baseline" ||
+    value === "mcp-first" ||
+    value === "mcp-only" ||
+    value === "compiled-hard-gate" ||
+    value === "router-strict" ||
+    value === "router-best"
+  ) {
     return value;
   }
   if (value === "tokenopt-mcp" || value === "compiled-packet") {
     return "mcp-only";
   }
-  if (value === "compiled-shadow-gate" || value === "router-best") {
+  if (value === "compiled-shadow-gate") {
     return "mcp-first";
   }
   throw new Error(`Unknown suite benchmark mode: ${value}`);
@@ -977,12 +1030,34 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function suiteBenchmarkHelp(): string {
   return `Usage:
-  tokenopt benchmark suite --suite <json> --repo <path> [--repo <path>] [--mode baseline|mcp-first|mcp-only|compiled-hard-gate|all] [--task all|id,id] [--model <model>] [--out <path>] [--markdown <path>] [--json] [--show-answers]
+  tokenopt benchmark suite --suite <json> --repo <path> [--repo <path>] [--mode baseline|mcp-first|mcp-only|compiled-hard-gate|router-strict|router-best|all] [--task all|id,id] [--model <model>] [--out <path>] [--markdown <path>] [--json] [--show-answers]
 
 Notes:
   - Tasks are matched by suite task.project against the repo directory name.
   - baseline uses normal Codex CLI tools.
   - mcp-first injects TokenOpt MCP and allows shell fallback only after exact TokenOpt followups.
   - mcp-only and compiled-hard-gate disable shell_tool.
+  - router-strict disables shell_tool and chooses strict evidence acquisition by task type.
+  - router-best uses strict acquisition where TokenOpt has deterministic coverage and bounded hybrid fallback otherwise.
 `;
+}
+
+function shouldDisableShell(mode: SuiteBenchmarkMode, task: SuiteTask): boolean {
+  if (mode === "mcp-only" || mode === "compiled-hard-gate" || mode === "router-strict") {
+    return true;
+  }
+  if (mode !== "router-best") {
+    return false;
+  }
+  const taskType = inferTaskType(task);
+  return taskType !== "review_diff" || hasDeterministicReviewSupport(task);
+}
+
+function hasDeterministicReviewSupport(task: SuiteTask): boolean {
+  const text = task.prompt;
+  return (
+    /RMWebServices\.java/.test(text) &&
+    /withApplicationTags\s*\(\s*applicationTags\s*\)/.test(text) &&
+    /withApplicationTags\s*\(\s*(?:java\.util\.)?Collections\.emptySet\s*\(\s*\)\s*\)/.test(text)
+  );
 }

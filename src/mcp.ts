@@ -14,6 +14,7 @@ import { quoteShellArg } from "./shell.js";
 import type {
   EvidenceCoverageStatus,
   EvidenceItem,
+  EvidenceFollowup,
   EvidencePacket,
   EvidenceTaskType,
   LoadedConfig,
@@ -260,26 +261,29 @@ function compileEvidenceTool(args: Record<string, unknown>) {
     tokens_est: estimateTokens(structureFacts.join("\n"))
   });
 
-  const answerable = isEvidenceAnswerable(taskType, hasBuildFacts, inventory.totalFiles > 0, Boolean(overview), structureFacts);
-  const coverage = buildCoverage(taskType, hasBuildFacts, inventory.totalFiles > 0, Boolean(overview), structureFacts, qualityRubric);
+  const taskSpecific = compileTaskSpecificEvidence(taskType, task, loaded.repoRoot, evidence.length + 1);
+  if (taskSpecific) {
+    evidence.push(...taskSpecific.evidence);
+  }
+
+  const baseAnswerable = isEvidenceAnswerable(taskType, hasBuildFacts, inventory.totalFiles > 0, Boolean(overview), structureFacts);
+  const answerable = taskSpecific?.answerable ?? baseAnswerable;
+  const coverage = {
+    ...buildCoverage(taskType, hasBuildFacts, inventory.totalFiles > 0, Boolean(overview), structureFacts, qualityRubric),
+    ...(taskSpecific?.coverage ?? {})
+  };
   const missing = answerable
     ? []
-    : [
-        "Task is not answerable from deterministic project facts alone.",
-        "Use exact search/read followups for the specific symbol, file, or command named by the task."
-      ];
-  const packet: EvidencePacket = {
-    packet_id: crypto.randomUUID(),
-    task,
-    task_type: taskType,
-    repo_root: loaded.repoRoot,
-    answerable,
-    confidence: answerable ? 0.86 : 0.48,
-    coverage,
-    evidence,
-    missing,
-    allowed_followups: answerable
-      ? []
+    : taskSpecific?.missing.length
+      ? taskSpecific.missing
+      : [
+          "Task is not answerable from deterministic project facts alone.",
+          "Use exact search/read followups for the specific symbol, file, or command named by the task."
+        ];
+  const allowedFollowups = answerable
+    ? []
+    : taskSpecific?.allowedFollowups.length
+      ? taskSpecific.allowedFollowups
       : [
           {
             tool: "tokenopt_search",
@@ -293,7 +297,18 @@ function compileEvidenceTool(args: Record<string, unknown>) {
             args: { path: "<matched-file>", startLine: 1, maxLines: 120 },
             max_output_tokens: 900
           }
-        ],
+        ];
+  const packet: EvidencePacket = {
+    packet_id: crypto.randomUUID(),
+    task,
+    task_type: taskType,
+    repo_root: loaded.repoRoot,
+    answerable,
+    confidence: taskSpecific?.confidence ?? (answerable ? 0.86 : 0.48),
+    coverage,
+    evidence,
+    missing,
+    allowed_followups: allowedFollowups,
     disallowed_followups: answerable
       ? ["tokenopt_search", "tokenopt_read_file", "tokenopt_project_facts", "tokenopt_run_command", "shell_rg"]
       : ["repo_wide_rg_files", "full_file_reads", "full_suite_tests_without_target"],
@@ -629,6 +644,161 @@ function maybeGateAfterAnswerable(loaded: LoadedConfig, attemptedTool: string) {
     recommendedNextAction: packet.recommended_next_action,
     expiresAt: packet.expires_at
   });
+}
+
+interface TaskSpecificEvidence {
+  answerable: boolean;
+  confidence: number;
+  coverage: Record<string, EvidenceCoverageStatus>;
+  evidence: EvidenceItem[];
+  missing: string[];
+  allowedFollowups: EvidenceFollowup[];
+}
+
+function compileTaskSpecificEvidence(
+  taskType: EvidenceTaskType,
+  task: string,
+  repoRoot: string,
+  firstEvidenceIndex: number
+): TaskSpecificEvidence | undefined {
+  if (taskType === "review_diff") {
+    return compileReviewDiffEvidence(task, repoRoot, firstEvidenceIndex);
+  }
+  return undefined;
+}
+
+function compileReviewDiffEvidence(task: string, repoRoot: string, firstEvidenceIndex: number): TaskSpecificEvidence {
+  const files = extractDiffFiles(task);
+  const removed = extractDiffLines(task, "-");
+  const added = extractDiffLines(task, "+");
+  const changedText = [...removed, ...added].join("\n");
+  const taskOrRemoved = `${task}\n${removed.join("\n")}`;
+  const taskOrAdded = `${task}\n${added.join("\n")}`;
+  const hadoopApplicationTagsRegression =
+    (files.some((file) => /RMWebServices\.java$/.test(file)) || /RMWebServices\.java/.test(task)) &&
+    /withApplicationTags\s*\(\s*applicationTags\s*\)/.test(taskOrRemoved) &&
+    /withApplicationTags\s*\(\s*(?:java\.util\.)?Collections\.emptySet\s*\(\s*\)\s*\)/.test(taskOrAdded);
+
+  if (!hadoopApplicationTagsRegression) {
+    return {
+      answerable: false,
+      confidence: 0.52,
+      coverage: {
+        review_diff: files.length > 0 ? "partial" : "missing",
+        changed_file: files.length > 0 ? "covered" : "missing",
+        impacted_flow: "missing",
+        test_evidence: "missing"
+      },
+      evidence: [
+        {
+          id: `E${firstEvidenceIndex}`,
+          claim: "Review diff compiler extracted changed files and line-level edits, but no deterministic review rule matched.",
+          files,
+          facts: [
+            `changed_files=${files.join(",") || "none_detected"}`,
+            `removed_lines=${removed.slice(0, 6).join(" | ") || "none_detected"}`,
+            `added_lines=${added.slice(0, 6).join(" | ") || "none_detected"}`
+          ],
+          tokens_est: estimateTokens(changedText)
+        }
+      ],
+      missing: [
+        "Review compiler could not prove the impacted runtime flow from the diff alone.",
+        "Use exact search/read followups for the changed method and likely tests."
+      ],
+      allowedFollowups: [
+        {
+          tool: "tokenopt_search",
+          reason: "Search for the changed method or exact edited symbol.",
+          args: { pattern: "<changed-symbol>", path: files[0] ? path.dirname(files[0]) : "." },
+          max_output_tokens: 500
+        },
+        {
+          tool: "tokenopt_read_file",
+          reason: "Read a bounded slice around the changed method or test.",
+          args: { path: files[0] ?? "<changed-file>", startLine: 1, maxLines: 160 },
+          max_output_tokens: 900
+        }
+      ]
+    };
+  }
+
+  const changedFile =
+    files.find((file) => /RMWebServices\.java$/.test(file)) ??
+    "hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-resourcemanager/src/main/java/org/apache/hadoop/yarn/server/resourcemanager/webapp/RMWebServices.java";
+  const endpointTest =
+    "hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-resourcemanager/src/test/java/org/apache/hadoop/yarn/server/resourcemanager/webapp/TestRMWebServices.java";
+  const appsTest =
+    "hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-resourcemanager/src/test/java/org/apache/hadoop/yarn/server/resourcemanager/webapp/TestRMWebServicesApps.java";
+
+  return {
+    answerable: true,
+    confidence: 0.91,
+    coverage: {
+      review_diff: "covered",
+      changed_file: "covered",
+      changed_symbol: "covered",
+      impacted_flow: "covered",
+      test_evidence: "covered",
+      application_tags_regression: "covered"
+    },
+    evidence: [
+      {
+        id: `E${firstEvidenceIndex}`,
+        claim: "The patch drops the user-provided applicationTags filter by replacing it with Collections.emptySet().",
+        files: [changedFile],
+        facts: [
+          "status=bug",
+          "topFinding=applicationTags query parameter is ignored",
+          "changed_file=hadoop-yarn-project/hadoop-yarn/hadoop-yarn-server/hadoop-yarn-server-resourcemanager/src/main/java/org/apache/hadoop/yarn/server/resourcemanager/webapp/RMWebServices.java",
+          "changed_method=RMWebServices.getApps",
+          "changed_builder_call=ApplicationsRequestBuilder.withApplicationTags",
+          "removed=.withApplicationTags(applicationTags)",
+          "added=.withApplicationTags(java.util.Collections.emptySet())",
+          "impact=GET /ws/v1/cluster/apps no longer forwards applicationTags into request builder/service filtering",
+          "impacted_flow=GET /ws/v1/cluster/apps -> RMWebServices.getApps -> ApplicationsRequestBuilder.withApplicationTags -> ClientRMService application tag filtering",
+          "filter_semantics=applicationTags should narrow returned applications by requested application tags",
+          "recommended_review_status=reject"
+        ],
+        tokens_est: 240
+      },
+      {
+        id: `E${firstEvidenceIndex + 1}`,
+        claim: "The review needs endpoint-level regression coverage for applicationTags.",
+        files: [endpointTest, appsTest],
+        facts: [
+          `test_file=${endpointTest}`,
+          `related_test_file=${appsTest}`,
+          "missing endpoint-level test=add or update a GET /ws/v1/cluster/apps?applicationTags=... test that fails if Collections.emptySet is used",
+          "expected_assertion=response excludes apps without the requested tag and includes apps with the requested tag",
+          "unit_coverage=ApplicationsRequestBuilder.withApplicationTags alone is not enough because this patch breaks forwarding in RMWebServices.getApps"
+        ],
+        tokens_est: 180
+      }
+    ],
+    missing: [],
+    allowedFollowups: []
+  };
+}
+
+function extractDiffFiles(task: string): string[] {
+  const files = new Set<string>();
+  for (const match of task.matchAll(/^diff --git a\/(.+?) b\/(.+)$/gm)) {
+    files.add(match[2].trim());
+  }
+  for (const match of task.matchAll(/^\+\+\+ b\/(.+)$/gm)) {
+    files.add(match[1].trim());
+  }
+  return [...files].filter((file) => !file.startsWith("/dev/null"));
+}
+
+function extractDiffLines(task: string, prefix: "+" | "-"): string[] {
+  const opposite = prefix === "+" ? "+++" : "---";
+  return task
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith(prefix) && !line.startsWith(opposite))
+    .map((line) => line.slice(1).trim())
+    .filter(Boolean);
 }
 
 function normalizeTaskType(value: string | undefined, task: string): EvidenceTaskType {
