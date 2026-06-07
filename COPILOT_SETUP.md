@@ -164,6 +164,16 @@ The installed block tells Copilot:
 - If `answerable=true`, answer from the packet and do not run more shell/search calls.
 - If `missing` is non-empty, use only `allowed_followups`.
 
+The user does not need to mention `tokenopt_compile_evidence` in normal prompts. After setup, prompts such as:
+
+```text
+Investigate checkout flow failure
+Based on this PBI, help me investigate and plan implementation
+Please help me write unit tests for OrderService
+```
+
+should be routed by the instruction layer. The exact MCP tool name belongs in `.github/copilot-instructions.md`, `AGENTS.md`, or Codex hook context, not in every user prompt.
+
 ### 3. Verify inside Copilot CLI
 
 Start Copilot CLI in the target repo:

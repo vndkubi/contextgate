@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 
-type CodexBenchmarkMode = "baseline" | "tokenopt-mcp" | "tokenopt-mcp+gate";
+type CodexBenchmarkMode = "baseline" | "tokenopt-mcp" | "tokenopt-mcp+gate" | "tokenopt-mcp-instructed";
 type CodexTaskId = "build-handoff" | "investigate" | "research-business" | "implement" | "write-unittest";
 
 interface CodexTask {
@@ -40,6 +40,8 @@ interface CodexBenchmarkRow extends CodexRunMetrics {
   task: CodexTaskId;
   taskType: string;
   mode: CodexBenchmarkMode;
+  userPrompt: string;
+  injectedInstruction: string;
   prompt: string;
   qualityScore: number;
   qualityChecks: string;
@@ -91,8 +93,8 @@ export async function runCodexBenchmarkCommand(args: string[]): Promise<number> 
   for (const repo of options.repos) {
     for (const task of options.tasks) {
       for (const mode of options.modes) {
-        const prompt = buildPrompt(repo, task, mode);
-        const run = runCodexBenchmark(repo, task, mode, options, prompt);
+        const promptParts = buildPromptParts(repo, task, mode);
+        const run = runCodexBenchmark(repo, task, mode, options, promptParts.prompt);
         const quality = scoreCodexAnswer(task, run.finalAnswer);
         rows.push({
           ...run,
@@ -100,7 +102,9 @@ export async function runCodexBenchmarkCommand(args: string[]): Promise<number> 
           task: task.id,
           taskType: task.taskType,
           mode,
-          prompt,
+          userPrompt: promptParts.userPrompt,
+          injectedInstruction: promptParts.injectedInstruction,
+          prompt: promptParts.prompt,
           qualityScore: quality.score,
           qualityChecks: `${quality.passed}/${quality.total}`,
           correct: quality.score >= 0.8
@@ -170,7 +174,7 @@ function parseOptions(args: string[]): {
       if (!value) {
         throw new Error("--mode requires a value");
       }
-      modes = value === "all" ? ["baseline", "tokenopt-mcp", "tokenopt-mcp+gate"] : value.split(",").map(parseMode);
+      modes = value === "all" ? ["baseline", "tokenopt-mcp", "tokenopt-mcp+gate", "tokenopt-mcp-instructed"] : value.split(",").map(parseMode);
       index += 1;
       continue;
     }
@@ -303,7 +307,11 @@ function runCodexBenchmark(
   };
 }
 
-function buildPrompt(repo: string, task: CodexTask, mode: CodexBenchmarkMode): string {
+function buildPromptParts(repo: string, task: CodexTask, mode: CodexBenchmarkMode): {
+  userPrompt: string;
+  injectedInstruction: string;
+  prompt: string;
+} {
   const outputContract = [
     "Return a concise final answer with these headings exactly:",
     "Summary:",
@@ -311,14 +319,36 @@ function buildPrompt(repo: string, task: CodexTask, mode: CodexBenchmarkMode): s
     "Recommended next steps:",
     "Do not modify files."
   ].join("\n");
+  const userPrompt = task.prompt;
 
   if (mode === "baseline") {
-    return [
-      task.prompt,
-      "",
+    const injectedInstruction = [
       "Use normal Codex CLI tools if needed. Keep shell/search calls minimal, but gather enough evidence for a correct answer.",
       outputContract
     ].join("\n");
+    return {
+      userPrompt,
+      injectedInstruction,
+      prompt: [userPrompt, "", injectedInstruction].join("\n")
+    };
+  }
+
+  if (mode === "tokenopt-mcp-instructed") {
+    const injectedInstruction = [
+      "Project instruction injected by TokenOpt setup:",
+      "The user may ask naturally and does not need to name MCP tools.",
+      "When TokenOpt MCP tools are available, use tokenopt_compile_evidence as the first context acquisition path for repository investigation, requirement/PBI planning, implementation handoff, and unit-test handoff tasks.",
+      "Infer the task_type from the natural-language user request.",
+      `For this request, the benchmark oracle classifies the task_type as ${task.taskType}; call tokenopt_compile_evidence with cwd=${repo}, task=<verbatim user request>, task_type=${task.taskType}, budget_tokens around 1800, and a concrete quality_rubric.`,
+      "If tokenopt_compile_evidence returns answerable=true, answer from the packet and do not call shell/search/read tools just to verify the same evidence.",
+      "If missing is non-empty, use only allowed_followups from the packet.",
+      outputContract
+    ].join("\n");
+    return {
+      userPrompt,
+      injectedInstruction,
+      prompt: [injectedInstruction, "", "User request:", userPrompt].join("\n")
+    };
   }
 
   const gateLine =
@@ -326,14 +356,17 @@ function buildPrompt(repo: string, task: CodexTask, mode: CodexBenchmarkMode): s
       ? `After tokenopt_compile_evidence returns answerable=true, deliberately call tokenopt_search once with pattern ${JSON.stringify(task.gatePattern)} to verify the answerability gate, then answer.`
       : "If tokenopt_compile_evidence returns answerable=true, do not call more tools; answer from the packet.";
 
-  return [
-    task.prompt,
-    "",
+  const injectedInstruction = [
     "You must use the TokenOpt MCP tool tokenopt_compile_evidence first.",
     `Call it with cwd=${repo}, task_type=${task.taskType}, and a budget around 1800 tokens.`,
     gateLine,
     outputContract
   ].join("\n");
+  return {
+    userPrompt,
+    injectedInstruction,
+    prompt: [userPrompt, "", injectedInstruction].join("\n")
+  };
 }
 
 function parseCodexJsonl(text: string): {
@@ -486,7 +519,7 @@ function formatRows(rows: CodexBenchmarkRow[], showAnswers: boolean): string {
   if (!showAnswers) {
     return `${lines.join("\n")}\n`;
   }
-  return `${lines.join("\n")}\n\nAnswers:\n${rows.map((row) => `\n[${path.basename(row.repo)} ${row.task} ${row.mode}]\ntask_type: ${row.taskType}\nprompt:\n${row.prompt}\n\nanswer:\n${row.finalAnswer}\nrawLog: ${row.rawLogPath}`).join("\n")}\n`;
+  return `${lines.join("\n")}\n\nAnswers:\n${rows.map((row) => `\n[${path.basename(row.repo)} ${row.task} ${row.mode}]\ntask_type: ${row.taskType}\nuserPrompt:\n${row.userPrompt}\n\ninjectedInstruction:\n${row.injectedInstruction}\n\nactualPromptSentToCodex:\n${row.prompt}\n\nanswer:\n${row.finalAnswer}\nrawLog: ${row.rawLogPath}`).join("\n")}\n`;
 }
 
 function parseTask(value: string): CodexTask {
@@ -498,7 +531,7 @@ function parseTask(value: string): CodexTask {
 }
 
 function parseMode(value: string): CodexBenchmarkMode {
-  if (value === "baseline" || value === "tokenopt-mcp" || value === "tokenopt-mcp+gate") {
+  if (value === "baseline" || value === "tokenopt-mcp" || value === "tokenopt-mcp+gate" || value === "tokenopt-mcp-instructed") {
     return value;
   }
   throw new Error(`Unknown codex benchmark mode: ${value}`);
@@ -518,6 +551,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function codexBenchmarkHelp(): string {
   return `Usage:
-  tokenopt benchmark codex-daily --repo <path> [--task all|build-handoff|investigate|research-business|implement|write-unittest] [--mode baseline|tokenopt-mcp|tokenopt-mcp+gate|all] [--model <model>] [--out <path>] [--json] [--show-answers]
+  tokenopt benchmark codex-daily --repo <path> [--task all|build-handoff|investigate|research-business|implement|write-unittest] [--mode baseline|tokenopt-mcp|tokenopt-mcp+gate|tokenopt-mcp-instructed|all] [--model <model>] [--out <path>] [--json] [--show-answers]
 `;
 }

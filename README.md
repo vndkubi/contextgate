@@ -132,4 +132,15 @@ For agent-level measurement through the real Codex CLI:
 node dist/cli.js benchmark codex-daily --repo D:\Personal\Projects\tokenopt --task build-handoff --mode all --show-answers --out benchmark-results\codex-daily-tokenopt.json
 ```
 
-This runner executes `npx @openai/codex@0.137.0 exec --json`, parses `turn.completed.usage`, counts shell and MCP tool calls, records raw JSONL logs, and scores the final Codex answer with the same task rubric. `tokenopt-mcp` mode disables Codex's shell tool and injects the TokenOpt MCP server so the agent must use `tokenopt_compile_evidence`.
+This runner executes `npx @openai/codex@0.137.0 exec --json`, parses `turn.completed.usage`, counts shell and MCP tool calls, records raw JSONL logs, and scores the final Codex answer with the same task rubric.
+
+Modes:
+
+```text
+baseline: natural task prompt with normal Codex tools.
+tokenopt-mcp: MCP enabled and the benchmark prompt explicitly names tokenopt_compile_evidence.
+tokenopt-mcp-instructed: natural user prompt; TokenOpt routing comes only from injected project/agent instructions.
+tokenopt-mcp+gate: MCP mode plus a deliberate redundant followup to verify answerability gating.
+```
+
+Use `tokenopt-mcp-instructed` when proving whether normal prompts like "Investigate flow X" or "write unittest for class Y" route through TokenOpt after setup. The JSON rows include `userPrompt`, `injectedInstruction`, and `prompt` so the benchmark shows what the user wrote versus what the agent setup supplied.

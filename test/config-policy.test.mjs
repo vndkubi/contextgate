@@ -85,6 +85,24 @@ test("user prompt blocks likely secrets", () => {
   assert.equal(decision.action, "deny");
 });
 
+test("user prompt injects TokenOpt MCP routing guidance for natural tasks", () => {
+  const loaded = loadConfig({ cwd: process.cwd(), env: {} });
+  const decision = evaluatePolicy(
+    {
+      source: "codex",
+      eventName: "user-prompt-submit",
+      cwd: process.cwd(),
+      prompt: "please help me write unittest for class OrderService",
+      raw: {}
+    },
+    loaded.config,
+    { repoRoot: process.cwd() }
+  );
+  assert.equal(decision.action, "context");
+  assert.match(decision.additionalContext, /tokenopt_compile_evidence/);
+  assert.match(decision.additionalContext, /inferred task_type/);
+});
+
 test("mcp lockfile reads are denied", () => {
   const loaded = loadConfig({ cwd: process.cwd(), env: {} });
   const decision = evaluatePolicy(
