@@ -1,0 +1,31 @@
+{
+  "name": "@tokenopt/cli",
+  "version": "0.1.0",
+  "description": "Reusable context-budget middleware for coding agents and repository hooks.",
+  "type": "module",
+  "bin": {
+    "tokenopt": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "SETUP.md",
+    "COPILOT_SETUP.md",
+    "tokenopt-separation-and-mcp-plan.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "doctor": "node dist/cli.js doctor"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.29",
+    "typescript": "^5.8.3"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0"
+  }
+}

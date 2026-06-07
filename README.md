@@ -1,0 +1,123 @@
+# TokenOpt CLI
+
+TokenOpt is a reusable context-budget middleware for coding agents. V1 is Codex-first and ships as a global npm CLI, while the core policy engine stays independent from CodeGraph and other repository indexers.
+
+## Install Locally
+
+Full setup guide: [SETUP.md](SETUP.md).
+Copilot-specific setup: [COPILOT_SETUP.md](COPILOT_SETUP.md).
+
+```bash
+npm install
+npm run build
+node dist/cli.js doctor
+```
+
+On Windows PowerShell, use `npm.cmd` if script execution policy blocks `npm.ps1`:
+
+```powershell
+cmd /c npm install
+cmd /c npm run build
+node dist/cli.js doctor
+```
+
+## Commands
+
+```text
+tokenopt init
+tokenopt install codex --scope user|repo
+tokenopt hook codex user-prompt-submit|pre-tool-use|post-tool-use|pre-compact
+tokenopt exec -- <command...>
+tokenopt mcp
+tokenopt benchmark daily --repo <path> [--task all] [--mode all] [--out results.json]
+tokenopt benchmark codex-daily --repo <path> [--mode all] [--out results.json]
+tokenopt instructions audit
+tokenopt instructions emit --target agents|codex|copilot
+tokenopt instructions install --target agents|codex|copilot
+tokenopt report
+tokenopt doctor
+```
+
+Config precedence is:
+
+```text
+built-in defaults -> ~/.tokenopt/config.json -> <repo>/.tokenopt/config.json -> env/CLI flags
+```
+
+The Codex installer writes hook commands as absolute `node <tokenopt-bin-js>` invocations, avoiding npm and shell shim differences across Windows, macOS, and Linux.
+
+## Gated MCP Mode
+
+Codex hooks are useful when they fire, but they are not the only way to route agent work through TokenOpt. For stricter enforcement, disable Codex's built-in shell tool and add TokenOpt as an MCP stdio server:
+
+```toml
+[features]
+shell_tool = false
+
+[mcp_servers.tokenopt]
+command = "node"
+args = ["D:\\Personal\\Projects\\tokenopt\\dist\\cli.js", "mcp"]
+required = true
+default_tools_approval_mode = "approve"
+```
+
+This exposes:
+
+```text
+tokenopt_compile_evidence
+tokenopt_run_command
+tokenopt_search
+tokenopt_read_file
+tokenopt_project_facts
+```
+
+In this mode, shell commands, searches, and file reads can be routed through TokenOpt-controlled tools that deny broad reads/searches, return bounded file slices, compress command output, and preserve raw logs under the user cache.
+
+`tokenopt_compile_evidence` is the preferred first call for onboarding/build-handoff tasks. It returns an answerability packet with coverage, evidence IDs, missing items, allowed followups, disallowed followups, and a recommended next action. If the packet is `answerable=true` and recommends `answer_now`, TokenOpt stores short-lived repo state and gates redundant MCP searches/reads/commands with a compact "answer now" response.
+
+MCP tools also need agent instructions. Emit or install the reusable prompt snippet:
+
+```bash
+node dist/cli.js instructions emit --target agents
+node dist/cli.js instructions install --target agents
+node dist/cli.js instructions install --target copilot
+```
+
+`agents`/`codex` writes `AGENTS.md`; `copilot` writes `.github/copilot-instructions.md`. The installed block tells agents to call `tokenopt_compile_evidence` first, answer from the packet when `answerable=true`, and avoid shell fallback after the answerability gate.
+
+## Benchmark
+
+Run the repeatable acquisition benchmark:
+
+```bash
+node dist/cli.js benchmark daily --repo D:\Personal\Projects\elasticsearch --repo D:\Personal\Projects\hadoop --task all --mode all --show-answers --out benchmark-results\daily-large-repos.json
+```
+
+The benchmark reports model-visible tool input/output chars, final output chars, estimated input/output/total tokens, quality score, quality checks, tool calls, MCP calls, shell calls, and fallback-after-answerable for:
+
+```text
+baseline
+compiled-packet
+compiled-packet+gate
+oracle-packet
+```
+
+Daily tasks:
+
+```text
+build-handoff
+investigate
+research-business
+implement
+write-unittest
+```
+
+Quality is scored by deterministic rubric checks against the generated benchmark answer. This measures the acquisition layer and answer-readiness directly. It does not replace a full model E2E judge; use it to verify whether TokenOpt reduces evidence replay before running agent-level A/B tests.
+
+For agent-level measurement through the real Codex CLI:
+
+```bash
+node dist/cli.js benchmark codex-daily --repo D:\Personal\Projects\tokenopt --task build-handoff --mode all --show-answers --out benchmark-results\codex-daily-tokenopt.json
+```
+
+This runner executes `npx @openai/codex@0.137.0 exec --json`, parses `turn.completed.usage`, counts shell and MCP tool calls, records raw JSONL logs, and scores the final Codex answer with the same task rubric. `tokenopt-mcp` mode disables Codex's shell tool and injects the TokenOpt MCP server so the agent must use `tokenopt_compile_evidence`.

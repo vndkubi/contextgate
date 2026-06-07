@@ -1,0 +1,289 @@
+import fs from "node:fs";
+import path from "node:path";
+import { compressText, extractTextFromToolResponse, shouldCompressOutput } from "./log-compressor.js";
+import { commandLooksWrapped, tokenizeCommand } from "./shell.js";
+import type { PolicyDecision, PolicyRuntime, TokenOptConfig, TokenOptEvent } from "./types.js";
+
+const LOCKFILE_NAMES = new Set([
+  "package-lock.json",
+  "npm-shrinkwrap.json",
+  "yarn.lock",
+  "pnpm-lock.yaml",
+  "bun.lockb",
+  "Cargo.lock",
+  "go.sum",
+  "Pipfile.lock",
+  "poetry.lock"
+]);
+
+const GENERATED_SEGMENTS = new Set([
+  "node_modules",
+  "dist",
+  "build",
+  "coverage",
+  ".next",
+  ".nuxt",
+  ".turbo",
+  ".cache",
+  "generated",
+  "__generated__"
+]);
+
+export function evaluatePolicy(event: TokenOptEvent, config: TokenOptConfig, runtime: PolicyRuntime): PolicyDecision {
+  if (!config.policy.enabled) {
+    return { action: "allow" };
+  }
+
+  switch (event.eventName) {
+    case "user-prompt-submit":
+      return evaluatePrompt(event, config);
+    case "pre-tool-use":
+      return evaluatePreToolUse(event, config, runtime);
+    case "post-tool-use":
+      return evaluatePostToolUse(event, config);
+    case "pre-compact":
+      return {
+        action: "allow",
+        reason: "PreCompact metadata recorded without reading unstable transcript contents."
+      };
+  }
+}
+
+function evaluatePrompt(event: TokenOptEvent, config: TokenOptConfig): PolicyDecision {
+  const prompt = event.prompt ?? "";
+  if (config.context.enableSecretBlock && containsLikelySecret(prompt)) {
+    return {
+      action: "deny",
+      reason: "Prompt appears to contain a secret or API key. Remove the secret before sending it to the model."
+    };
+  }
+
+  const context = config.codegraph.enabled
+    ? `${config.context.userPromptGuidance} CodeGraph is configured as an optional repository context provider; prefer bounded CodeGraph packs before broad raw file reads.`
+    : config.context.userPromptGuidance;
+
+  return {
+    action: "context",
+    additionalContext: context
+  };
+}
+
+function evaluatePreToolUse(event: TokenOptEvent, config: TokenOptConfig, runtime: PolicyRuntime): PolicyDecision {
+  const toolName = event.toolName ?? "";
+
+  if (toolName === "Bash") {
+    const command = extractCommand(event.toolInput);
+    if (!command) {
+      return { action: "allow" };
+    }
+
+    const broadSearch = detectBroadSearch(command);
+    if (broadSearch) {
+      return {
+        action: config.policy.broadSearch.mode === "warn" ? "context" : "deny",
+        reason: broadSearch,
+        additionalContext: `${broadSearch} Prefer a targeted query with a concrete pattern and cap results near ${config.policy.broadSearch.maxResults}.`
+      };
+    }
+
+    const readTarget = extractReadTarget(command);
+    if (readTarget) {
+      const decision = evaluateReadTarget(readTarget, config, runtime.repoRoot);
+      if (decision) {
+        return decision;
+      }
+    }
+
+    const expensiveTest = detectExpensiveTest(command, config);
+    if (expensiveTest && !commandLooksWrapped(command)) {
+      if (config.policy.expensiveTests.mode === "rewrite" && runtime.tokenoptCommand) {
+        return {
+          action: "rewrite",
+          reason: `${expensiveTest} Rewriting through tokenopt exec so raw output is preserved but model-visible output is compact.`,
+          updatedInput: { command: `${runtime.tokenoptCommand} exec -- ${command}` }
+        };
+      }
+      if (config.policy.expensiveTests.mode === "warn") {
+        return {
+          action: "context",
+          reason: expensiveTest,
+          additionalContext: config.policy.expensiveTests.targetedHint
+        };
+      }
+    }
+
+    return { action: "allow" };
+  }
+
+  if (toolName === "apply_patch") {
+    return { action: "allow" };
+  }
+
+  if (toolName.startsWith("mcp__")) {
+    const target = extractMcpReadTarget(event.toolInput);
+    if (target && /read|get|file|resource/i.test(toolName)) {
+      const decision = evaluateReadTarget(target, config, runtime.repoRoot);
+      if (decision) {
+        return decision;
+      }
+    }
+  }
+
+  return { action: "allow" };
+}
+
+function evaluatePostToolUse(event: TokenOptEvent, config: TokenOptConfig): PolicyDecision {
+  const text = extractTextFromToolResponse(event.toolResponse);
+  if (!text || !shouldCompressOutput(text, config.policy.maxCommandOutputChars)) {
+    return { action: "allow" };
+  }
+
+  const compressed = compressText(text, config.policy.maxCommandOutputChars);
+  return {
+    action: "compress",
+    reason: "Tool output is noisy or failure-heavy; TokenOpt compressed it and will preserve the raw artifact.",
+    replacementText: compressed.text,
+    estimatedTokensSaved: compressed.estimatedTokensSaved,
+    shouldPersistRaw: true,
+    metadata: {
+      kind: compressed.kind,
+      originalChars: compressed.originalChars,
+      compressedChars: compressed.compressedChars
+    }
+  };
+}
+
+function evaluateReadTarget(target: string, config: TokenOptConfig, repoRoot: string): PolicyDecision | undefined {
+  const normalized = normalizeRelativePath(target);
+  if (!normalized) {
+    return undefined;
+  }
+
+  if (config.policy.denyLockfileReads && isLockfile(normalized)) {
+    return {
+      action: "deny",
+      reason: `Reading ${path.basename(normalized)} is blocked by TokenOpt because lockfiles are usually high-token and low-signal. Use targeted dependency queries or explain why the lockfile is needed.`
+    };
+  }
+
+  if (config.policy.denyGeneratedReads && isGeneratedPath(normalized)) {
+    return {
+      action: "deny",
+      reason: `Reading generated or build output is blocked by TokenOpt: ${normalized}. Inspect source files or bounded slices instead.`
+    };
+  }
+
+  const absolute = path.isAbsolute(normalized) ? normalized : path.join(repoRoot, normalized);
+  if (fs.existsSync(absolute)) {
+    const stat = fs.statSync(absolute);
+    if (stat.isFile() && stat.size > config.policy.maxFileReadBytes) {
+      return {
+        action: "deny",
+        reason: `Full-file read is blocked because ${normalized} is ${stat.size} bytes. Request a bounded slice or targeted search instead.`
+      };
+    }
+  }
+
+  return undefined;
+}
+
+function extractCommand(toolInput: unknown): string | undefined {
+  if (typeof toolInput === "object" && toolInput !== null) {
+    const command = (toolInput as Record<string, unknown>).command;
+    return typeof command === "string" ? command : undefined;
+  }
+  return undefined;
+}
+
+function extractReadTarget(command: string): string | undefined {
+  const tokens = tokenizeCommand(command);
+  if (tokens.length === 0) {
+    return undefined;
+  }
+  const executable = path.basename(tokens[0] ?? "").toLowerCase();
+  if (!["cat", "type", "get-content", "gc"].includes(executable)) {
+    return undefined;
+  }
+  for (const token of tokens.slice(1)) {
+    if (token.startsWith("-") || token === "|" || token === ">") {
+      continue;
+    }
+    return token;
+  }
+  return undefined;
+}
+
+function extractMcpReadTarget(input: unknown): string | undefined {
+  if (typeof input !== "object" || input === null) {
+    return undefined;
+  }
+  const record = input as Record<string, unknown>;
+  for (const key of ["path", "file_path", "filepath", "uri", "name"]) {
+    const value = record[key];
+    if (typeof value === "string") {
+      return value.startsWith("file://") ? new URL(value).pathname : value;
+    }
+  }
+  return undefined;
+}
+
+function detectBroadSearch(command: string): string | undefined {
+  const normalized = command.trim();
+  if (/^rg\s+["']?\.["']?\s*$/.test(normalized) || /^rg\s+["']{2}\s*$/.test(normalized)) {
+    return "Unbounded ripgrep search is blocked.";
+  }
+  if (/^rg\s+--files\b/.test(normalized)) {
+    return "Repo-wide ripgrep file listing is blocked.";
+  }
+  if (/^grep\s+-R\b.*\s+\.\s*$/.test(normalized)) {
+    return "Recursive grep over the whole repo is blocked.";
+  }
+  if (/^(?:find|Get-ChildItem)\s+\.\b.*(?:-type\s+f|-Recurse)/i.test(normalized)) {
+    return "Unbounded recursive file listing is blocked.";
+  }
+  if (/^ls\s+-R\b/.test(normalized)) {
+    return "Recursive ls is blocked.";
+  }
+  return undefined;
+}
+
+function detectExpensiveTest(command: string, config: TokenOptConfig): string | undefined {
+  const normalized = command.trim();
+  for (const pattern of config.policy.expensiveTests.patterns) {
+    if (new RegExp(pattern, "i").test(normalized)) {
+      return `Potentially expensive test command detected: ${normalized}.`;
+    }
+  }
+  return undefined;
+}
+
+function containsLikelySecret(text: string): boolean {
+  const patterns = [
+    /\bsk-[A-Za-z0-9_-]{20,}\b/,
+    /\bgh[pousr]_[A-Za-z0-9_]{20,}\b/,
+    /\bAKIA[0-9A-Z]{16}\b/,
+    /\b(?:api[_-]?key|secret|token)\s*[:=]\s*['"]?[A-Za-z0-9_\-.]{24,}/i
+  ];
+  return patterns.some((pattern) => pattern.test(text));
+}
+
+function normalizeRelativePath(target: string): string | undefined {
+  const withoutQuery = target.split(/[?#]/, 1)[0];
+  const cleaned = withoutQuery.replace(/^['"]|['"]$/g, "");
+  if (!cleaned || cleaned === "-") {
+    return undefined;
+  }
+  return cleaned;
+}
+
+function isLockfile(filePath: string): boolean {
+  return LOCKFILE_NAMES.has(path.basename(filePath));
+}
+
+function isGeneratedPath(filePath: string): boolean {
+  const parts = filePath.split(/[\\/]+/);
+  if (parts.some((part) => GENERATED_SEGMENTS.has(part))) {
+    return true;
+  }
+  return /\.(?:min\.js|map|d\.ts)$/.test(filePath);
+}

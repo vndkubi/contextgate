@@ -1,0 +1,8 @@
+node_modules/
+dist/
+coverage/
+benchmark-results/
+*.tgz
+.tokenopt/artifacts/
+.tokenopt/*.jsonl
+npm-debug.log*

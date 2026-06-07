@@ -1,0 +1,48 @@
+import fs from "node:fs";
+import path from "node:path";
+import { getRepoCacheDir } from "./observability.js";
+import type { EvidencePacket, EvidenceTaskState, TokenOptConfig } from "./types.js";
+
+const STATE_FILE = "evidence-task-state.json";
+
+export function writeEvidenceTaskState(
+  config: TokenOptConfig,
+  repoRoot: string,
+  packet: EvidencePacket
+): string {
+  const dir = getRepoCacheDir(config, repoRoot);
+  fs.mkdirSync(dir, { recursive: true });
+  const filePath = path.join(dir, STATE_FILE);
+  const state: EvidenceTaskState = {
+    packet,
+    stored_at: new Date().toISOString()
+  };
+  fs.writeFileSync(filePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+  return filePath;
+}
+
+export function readActiveEvidenceTaskState(
+  config: TokenOptConfig,
+  repoRoot: string,
+  now = new Date()
+): EvidenceTaskState | undefined {
+  const filePath = path.join(getRepoCacheDir(config, repoRoot), STATE_FILE);
+  if (!fs.existsSync(filePath)) {
+    return undefined;
+  }
+
+  let state: EvidenceTaskState;
+  try {
+    state = JSON.parse(fs.readFileSync(filePath, "utf8")) as EvidenceTaskState;
+  } catch {
+    return undefined;
+  }
+
+  if (!state.packet.answerable || state.packet.recommended_next_action !== "answer_now") {
+    return undefined;
+  }
+  if (Date.parse(state.packet.expires_at) <= now.getTime()) {
+    return undefined;
+  }
+  return state;
+}
