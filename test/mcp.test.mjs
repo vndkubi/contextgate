@@ -162,6 +162,44 @@ test("mcp compiles business deep-dive evidence and gates grep fallback", async (
   );
 });
 
+test("mcp does not mark target-specific business task answerable without target evidence", async () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "tokenopt-target-business-repo-"));
+  fs.mkdirSync(path.join(repo, "src", "orders"), { recursive: true });
+  fs.writeFileSync(
+    path.join(repo, "package.json"),
+    JSON.stringify({ name: "merchant-platform", version: "1.0.0", scripts: { test: "vitest run" } }, null, 2)
+  );
+  fs.writeFileSync(
+    path.join(repo, "README.md"),
+    [
+      "# Merchant Platform",
+      "",
+      "Merchant Platform helps online merchants manage catalog, checkout, payment authorization, order fulfillment, and customer support workflows from one operational system."
+    ].join("\n")
+  );
+  fs.writeFileSync(path.join(repo, "src", "orders", "OrderService.ts"), "export class OrderService {}\n");
+
+  await withTokenOptMcp(
+    async (client) => {
+      const packet = await client.callTool({
+        name: "tokenopt_compile_evidence",
+        arguments: {
+          task: "study returns business and deep dive that business and explain detail for me",
+          cwd: repo,
+          quality_rubric: ["explain target-specific business evidence"]
+        }
+      });
+      assert.equal(packet.isError ?? false, false);
+      assert.match(packet.content[0].text, /task_type: research_business/);
+      assert.match(packet.content[0].text, /answerable: false/);
+      assert.match(packet.content[0].text, /target_specific_evidence: missing/);
+      assert.match(packet.content[0].text, /Target-specific evidence missing for: returns/);
+      assert.match(packet.content[0].text, /tokenopt_search: Find evidence tied to the exact requested target/);
+    },
+    { cwd: repo }
+  );
+});
+
 test("mcp compiles existing flow packet for diagramming and routes fallback to TokenOpt followups", async () => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "tokenopt-flow-repo-"));
   fs.mkdirSync(path.join(repo, "src", "checkout"), { recursive: true });

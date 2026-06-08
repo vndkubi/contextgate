@@ -310,13 +310,26 @@ function compileEvidenceTool(args: Record<string, unknown>) {
   }
 
   const baseAnswerable = isEvidenceAnswerable(taskType, hasBuildFacts, inventory.totalFiles > 0, Boolean(overview), structureFacts);
-  const answerable = taskSpecific?.answerable ?? baseAnswerable;
+  const initialAnswerable = taskSpecific?.answerable ?? baseAnswerable;
+  const specificity = checkTargetSpecificity(task, taskType, evidence);
+  const answerable = initialAnswerable && specificity.missing.length === 0;
   const coverage = {
     ...buildCoverage(taskType, hasBuildFacts, inventory.totalFiles > 0, Boolean(overview), structureFacts, qualityRubric),
-    ...(taskSpecific?.coverage ?? {})
+    ...(taskSpecific?.coverage ?? {}),
+    ...(specificity.terms.length > 0
+      ? {
+          target_specific_evidence: specificity.missing.length === 0 ? "covered" as const : specificity.covered.length > 0 ? "partial" as const : "missing" as const
+        }
+      : {})
   };
   const missing = answerable
     ? []
+    : specificity.missing.length > 0
+      ? [
+          `Target-specific evidence missing for: ${specificity.missing.join(", ")}.`,
+          "TokenOpt cannot mark this task answerable until the packet includes evidence tied to the requested target.",
+          ...(taskSpecific?.missing ?? [])
+        ]
     : taskSpecific?.missing.length
       ? taskSpecific.missing
       : [
@@ -325,6 +338,8 @@ function compileEvidenceTool(args: Record<string, unknown>) {
         ];
   const allowedFollowups = answerable
     ? []
+    : specificity.missing.length > 0
+      ? buildTargetSpecificFollowups(specificity.missing)
     : taskSpecific?.allowedFollowups.length
       ? taskSpecific.allowedFollowups
       : [
@@ -1028,6 +1043,12 @@ interface BusinessProfile {
   hasDeepDiveSignal: boolean;
 }
 
+interface TargetSpecificityCheck {
+  terms: string[];
+  covered: string[];
+  missing: string[];
+}
+
 interface FlowProfile {
   target: string;
   searchTerms: string[];
@@ -1057,6 +1078,151 @@ function compileTaskSpecificEvidence(
     return compileFlowEvidence(task, firstEvidenceIndex, context);
   }
   return undefined;
+}
+
+function checkTargetSpecificity(task: string, taskType: EvidenceTaskType, evidence: EvidenceItem[]): TargetSpecificityCheck {
+  if (taskType === "build_handoff" || taskType === "review_diff") {
+    return { terms: [], covered: [], missing: [] };
+  }
+  const terms = extractSpecificTaskTerms(task, taskType);
+  if (terms.length === 0) {
+    return { terms, covered: [], missing: [] };
+  }
+
+  const evidenceText = normalizeEvidenceText(
+    evidence.flatMap((item) => [
+      item.claim,
+      ...(item.files ?? []),
+      ...(item.facts ?? []),
+      item.snippet ?? ""
+    ]).join("\n")
+  );
+  const covered = terms.filter((term) => evidenceText.includes(normalizeEvidenceText(term)));
+  const missing = terms.filter((term) => !covered.includes(term));
+  return { terms, covered, missing };
+}
+
+function extractSpecificTaskTerms(task: string, taskType: EvidenceTaskType): string[] {
+  const stopWords = new Set([
+    "about",
+    "after",
+    "all",
+    "and",
+    "any",
+    "actor",
+    "actors",
+    "answer",
+    "are",
+    "before",
+    "business",
+    "can",
+    "call",
+    "chain",
+    "class",
+    "code",
+    "codebase",
+    "deep",
+    "detail",
+    "diagram",
+    "dive",
+    "docs",
+    "document",
+    "domain",
+    "draw",
+    "e2e",
+    "endtoend",
+    "evidence",
+    "explain",
+    "flow",
+    "flowchart",
+    "for",
+    "help",
+    "implementation",
+    "investigate",
+    "into",
+    "from",
+    "how",
+    "mermaid",
+    "module",
+    "modules",
+    "please",
+    "product",
+    "project",
+    "read",
+    "readonly",
+    "repo",
+    "repository",
+    "research",
+    "sequence",
+    "service",
+    "specific",
+    "study",
+    "system",
+    "task",
+    "test",
+    "the",
+    "that",
+    "this",
+    "trace",
+    "understand",
+    "until",
+    "unit",
+    "unittest",
+    "what",
+    "when",
+    "who",
+    "why",
+    "with",
+    "without",
+    "write"
+  ]);
+  const terms = new Set<string>();
+  for (const term of [...extractQuotedTerms(task), ...extractRouteTerms(task)]) {
+    addSpecificTerm(terms, term, stopWords);
+  }
+  for (const match of task.matchAll(/\b[A-Za-z][A-Za-z0-9_./:-]{2,}\b/g)) {
+    addSpecificTerm(terms, match[0], stopWords);
+  }
+
+  const ordered = [...terms];
+  if (taskType === "api_flow") {
+    return ordered.slice(0, 6);
+  }
+  return ordered.slice(0, 4);
+}
+
+function addSpecificTerm(terms: Set<string>, value: string, stopWords: Set<string>): void {
+  const cleaned = value.trim().replace(/^[^A-Za-z0-9/_:-]+|[^A-Za-z0-9/_:-]+$/g, "");
+  if (cleaned.length < 3) {
+    return;
+  }
+  const normalized = cleaned.toLowerCase().replace(/[^a-z0-9]+/g, "");
+  if (normalized.length < 3 || stopWords.has(normalized) || /^\d+$/.test(normalized)) {
+    return;
+  }
+  terms.add(cleaned);
+}
+
+function normalizeEvidenceText(text: string): string {
+  return text.toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function buildTargetSpecificFollowups(missingTerms: string[]): EvidenceFollowup[] {
+  const pattern = missingTerms[0] ?? "<exact-target>";
+  return [
+    {
+      tool: "tokenopt_search",
+      reason: "Find evidence tied to the exact requested target before marking the task answerable.",
+      args: { pattern, path: "." },
+      max_output_tokens: 800
+    },
+    {
+      tool: "tokenopt_read_file",
+      reason: "Read a bounded slice around the most relevant target-specific match.",
+      args: { path: "<matched-file>", startLine: 1, maxLines: 180 },
+      max_output_tokens: 1100
+    }
+  ];
 }
 
 function compileFlowEvidence(task: string, firstEvidenceIndex: number, context: EvidenceContext): TaskSpecificEvidence {
