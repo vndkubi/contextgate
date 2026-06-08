@@ -13,7 +13,8 @@ type CodexTaskId =
   | "investigate-flow"
   | "pbi-plan"
   | "write-unittest-class"
-  | "requirement-analysis";
+  | "requirement-analysis"
+  | "repo-benchmark-analysis";
 
 interface CodexTask {
   id: CodexTaskId;
@@ -125,6 +126,13 @@ const REALISTIC_CODEX_TASKS: CodexTask[] = [
     prompt:
       "Analyze this requirement against the codebase and produce WHAT, WHY, HOW, acceptance criteria, impacted code areas, test strategy, unknowns, and a practical implementation plan: add a guarded behavior change that preserves backwards compatibility for existing users. Do not modify files.",
     gatePattern: "requirement"
+  },
+  {
+    id: "repo-benchmark-analysis",
+    taskType: "investigate",
+    prompt:
+      "If this repository contains benchmark, evaluation, or performance documentation/scripts, identify what exists, how it is run, what it measures, and how to include it in a validation plan for future changes. If there is no benchmark material, say so. Do not modify files.",
+    gatePattern: "benchmark"
   }
 ];
 const CODEX_TASKS: CodexTask[] = [...DAILY_CODEX_TASKS, ...REALISTIC_CODEX_TASKS];
@@ -525,12 +533,17 @@ function scoreCodexAnswer(task: CodexTask, answer: string): { score: number; pas
   if (task.id === "build-handoff") {
     checks.push(["build_tool", /\b(Gradle|Maven|Npm|npm|package\.json|pom\.xml|gradlew|mvn)\b/i.test(answer)]);
     checks.push(["command_or_script", /\b(test|build|script|command|gradlew|mvn|npm)\b/i.test(answer)]);
-  } else if (task.id === "investigate" || task.id === "investigate-flow") {
+  } else if (task.id === "investigate" || task.id === "investigate-flow" || task.id === "repo-benchmark-analysis") {
     checks.push(["hypothesis", /\b(hypothes|likely|cause|triage|investigate)\b/i.test(answer)]);
     checks.push(["command", /\b(command|run|gradlew|mvn|npm|rg)\b/i.test(answer)]);
     if (task.id === "investigate-flow") {
       checks.push(["flow_or_path", /\b(flow|entry|path|route|controller|service|module|dependency)\b/i.test(answer)]);
       checks.push(["missing_evidence", /\b(missing|unknown|inspect next|evidence to inspect)\b/i.test(answer)]);
+    }
+    if (task.id === "repo-benchmark-analysis") {
+      checks.push(["benchmark_material", /\b(benchmark|bench|evaluation|eval|performance|perf)\b/i.test(answer)]);
+      checks.push(["measures", /\b(measure|metric|token|latency|accuracy|throughput|cost|quality)\b/i.test(answer)]);
+      checks.push(["validation_plan", /\b(validation|verify|plan|future changes|regression)\b/i.test(answer)]);
     }
   } else if (task.id === "research-business") {
     checks.push(["purpose", /\b(purpose|repository|project|domain|product)\b/i.test(answer)]);
@@ -660,6 +673,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function codexBenchmarkHelp(): string {
   return `Usage:
-  tokenopt benchmark codex-daily --repo <path> [--task daily|realistic|all|build-handoff|investigate|research-business|implement|write-unittest|investigate-flow|pbi-plan|write-unittest-class|requirement-analysis] [--mode baseline|tokenopt-mcp|tokenopt-mcp+gate|tokenopt-mcp-instructed|all] [--model <model>] [--out <path>] [--json] [--show-answers]
+  tokenopt benchmark codex-daily --repo <path> [--task daily|realistic|all|build-handoff|investigate|research-business|implement|write-unittest|investigate-flow|pbi-plan|write-unittest-class|requirement-analysis|repo-benchmark-analysis] [--mode baseline|tokenopt-mcp|tokenopt-mcp+gate|tokenopt-mcp-instructed|all] [--model <model>] [--out <path>] [--json] [--show-answers]
 `;
 }

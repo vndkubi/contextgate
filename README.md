@@ -149,7 +149,7 @@ Task sets:
 
 ```text
 daily: build handoff, investigate, business/domain research, implement handoff, unit-test handoff.
-realistic: investigate primary flow, PBI/requirement implementation plan, unit-test plan for likely owning class/module, requirement WHAT/WHY/HOW/acceptance criteria analysis.
+realistic: investigate primary flow, PBI/requirement implementation plan, unit-test plan for likely owning class/module, requirement WHAT/WHY/HOW/acceptance criteria analysis, and repo benchmark/evaluation material analysis.
 all: daily + realistic.
 ```
 
