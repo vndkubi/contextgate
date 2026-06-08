@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { loadConfig } from "../dist/config.js";
+import { writeEvidenceTaskState } from "../dist/evidence-state.js";
 import { evaluatePolicy } from "../dist/policy-core.js";
 
 test("config precedence loads user then repo then env", () => {
@@ -135,4 +136,50 @@ test("repo-wide rg file listing is denied", () => {
     { repoRoot: process.cwd() }
   );
   assert.equal(decision.action, "deny");
+});
+
+test("pre-tool-use denies shell grep after answerable evidence packet", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "tokenopt-policy-gate-"));
+  const artifactDir = fs.mkdtempSync(path.join(os.tmpdir(), "tokenopt-policy-artifacts-"));
+  fs.writeFileSync(path.join(repo, "package.json"), JSON.stringify({ name: "policy-gate-fixture" }));
+  const loaded = loadConfig({ cwd: repo, env: { TOKENOPT_ARTIFACT_DIR: artifactDir } });
+  writeEvidenceTaskState(loaded.config, loaded.repoRoot, {
+    packet_id: "packet-123",
+    task: "study business and deep dive that business",
+    task_type: "research_business",
+    repo_root: loaded.repoRoot,
+    answerable: true,
+    confidence: 0.88,
+    coverage: {},
+    evidence: [],
+    missing: [],
+    allowed_followups: [],
+    disallowed_followups: ["shell_grep"],
+    recommended_next_action: "answer_now",
+    max_additional_calls: 0,
+    token_budget: {
+      budget_tokens: 1600,
+      evidence_tokens_est: 200,
+      response_tokens_est: 700
+    },
+    created_at: new Date().toISOString(),
+    expires_at: new Date(Date.now() + 60_000).toISOString()
+  });
+
+  const decision = evaluatePolicy(
+    {
+      source: "codex",
+      eventName: "pre-tool-use",
+      cwd: repo,
+      toolName: "Bash",
+      toolInput: { command: "grep -R Needle src" },
+      raw: {}
+    },
+    loaded.config,
+    { repoRoot: loaded.repoRoot }
+  );
+
+  assert.equal(decision.action, "deny");
+  assert.match(decision.reason, /answerability gate blocked shell search/);
+  assert.match(decision.reason, /packet-123/);
 });

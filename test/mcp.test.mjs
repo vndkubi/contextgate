@@ -88,6 +88,77 @@ test("mcp replaces broad command with bounded inventory", async () => {
   });
 });
 
+test("mcp compiles business deep-dive evidence and gates grep fallback", async () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "tokenopt-business-repo-"));
+  fs.mkdirSync(path.join(repo, "src", "checkout"), { recursive: true });
+  fs.mkdirSync(path.join(repo, "docs"), { recursive: true });
+  fs.writeFileSync(
+    path.join(repo, "package.json"),
+    JSON.stringify(
+      {
+        name: "merchant-platform",
+        version: "1.0.0",
+        scripts: { test: "vitest run" }
+      },
+      null,
+      2
+    )
+  );
+  fs.writeFileSync(
+    path.join(repo, "README.md"),
+    [
+      "# Merchant Platform",
+      "",
+      "Merchant Platform helps online merchants manage catalog, checkout, payment authorization, order fulfillment, and customer support workflows from one operational system.",
+      "",
+      "## Product capabilities",
+      "",
+      "The system coordinates catalog publishing, cart checkout, payment capture, refunds, order status, and fulfillment events."
+    ].join("\n")
+  );
+  fs.writeFileSync(
+    path.join(repo, "docs", "business.md"),
+    [
+      "# Business model",
+      "",
+      "Merchants use the platform to reduce manual order operations and give customers a reliable checkout and fulfillment experience.",
+      "",
+      "## Checkout and payments",
+      "## Fulfillment operations",
+      "## Customer support"
+    ].join("\n")
+  );
+  fs.writeFileSync(path.join(repo, "src", "checkout", "PaymentService.ts"), "export class PaymentService {}\n");
+
+  await withTokenOptMcp(
+    async (client) => {
+      const packet = await client.callTool({
+        name: "tokenopt_compile_evidence",
+        arguments: {
+          task: "study business and deep dive that business and explain detail for me",
+          cwd: repo,
+          quality_rubric: ["explain what why how", "identify users", "map business to project areas"]
+        }
+      });
+      assert.equal(packet.isError ?? false, false);
+      assert.match(packet.content[0].text, /task_type: research_business/);
+      assert.match(packet.content[0].text, /answerable: true/);
+      assert.match(packet.content[0].text, /business_purpose=Merchant Platform helps online merchants/);
+      assert.match(packet.content[0].text, /likely_users=.*business users\/customers/);
+      assert.match(packet.content[0].text, /final_answer_sections=What this business\/product is/);
+      assert.match(packet.content[0].text, /shell_grep/);
+
+      const gated = await client.callTool({
+        name: "tokenopt_run_command",
+        arguments: { command: "grep -R checkout src", cwd: repo }
+      });
+      assert.equal(gated.isError ?? false, false);
+      assert.match(gated.content[0].text, /TokenOpt answerability gate/);
+    },
+    { cwd: repo }
+  );
+});
+
 test("mcp compiles answerable evidence and gates redundant exploration", async () => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "tokenopt-evidence-repo-"));
   fs.mkdirSync(path.join(repo, "src"), { recursive: true });

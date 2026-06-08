@@ -78,7 +78,7 @@ In this mode, shell commands, searches, and file reads can be routed through Tok
 
 `rg` is only the fast search provider, not a hard requirement. MCP search and project inventory try providers in this order: `rg`, `git`, then a bounded built-in Node scanner. Tool output includes `searchProvider` so benchmark reports and agent transcripts show which provider was used instead of stopping at "rg not found".
 
-`tokenopt_compile_evidence` is the preferred first call for onboarding/build-handoff tasks. It returns an answerability packet with coverage, evidence IDs, missing items, allowed followups, disallowed followups, and a recommended next action. If the packet is `answerable=true` and recommends `answer_now`, TokenOpt stores short-lived repo state and gates redundant MCP searches/reads/commands with a compact "answer now" response.
+`tokenopt_compile_evidence` is the preferred first call for onboarding, business/domain deep dives, build handoffs, investigations, implementation planning, and unit-test planning. It returns an answerability packet with coverage, evidence IDs, missing items, allowed followups, disallowed followups, and a recommended next action. For `research_business` tasks, the packet includes deterministic business purpose, likely users, core capabilities, major project areas, domain terms, doc signals, and an answer contract. If the packet is `answerable=true` and recommends `answer_now`, TokenOpt stores short-lived repo state and gates redundant MCP searches/reads/commands with a compact "answer now" response. Codex hooks can also deny shell grep/search after an answerable packet; MCP alone cannot disable a host shell tool.
 
 MCP tools also need agent instructions. Emit or install the reusable prompt snippet:
 

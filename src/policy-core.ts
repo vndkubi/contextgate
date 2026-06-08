@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { readActiveEvidenceTaskState } from "./evidence-state.js";
 import { compressText, extractTextFromToolResponse, shouldCompressOutput } from "./log-compressor.js";
 import { commandLooksWrapped, tokenizeCommand } from "./shell.js";
 import type { PolicyDecision, PolicyRuntime, TokenOptConfig, TokenOptEvent } from "./types.js";
@@ -75,6 +76,16 @@ function evaluatePreToolUse(event: TokenOptEvent, config: TokenOptConfig, runtim
     const command = extractCommand(event.toolInput);
     if (!command) {
       return { action: "allow" };
+    }
+
+    const activeEvidence = readActiveEvidenceTaskState(config, runtime.repoRoot);
+    if (activeEvidence && detectShellSearch(command)) {
+      return {
+        action: "deny",
+        reason:
+          `TokenOpt answerability gate blocked shell search after answerable packet ${activeEvidence.packet.packet_id} ` +
+          `(${activeEvidence.packet.task_type}). Answer from the packet, or call tokenopt_compile_evidence for a changed task.`
+      };
     }
 
     const broadSearch = detectBroadSearch(command);
@@ -245,6 +256,23 @@ function detectBroadSearch(command: string): string | undefined {
     return "Recursive ls is blocked.";
   }
   return undefined;
+}
+
+function detectShellSearch(command: string): boolean {
+  const normalized = command.trim();
+  const tokens = tokenizeCommand(normalized);
+  const executable = path.basename(tokens[0] ?? "").toLowerCase();
+  if (["rg", "grep", "findstr", "ag", "ack"].includes(executable)) {
+    return true;
+  }
+  if (executable === "git" && (tokens[1] ?? "").toLowerCase() === "grep") {
+    return true;
+  }
+  if (executable === "select-string" || executable === "sls") {
+    return true;
+  }
+  return /(?:^|[|;&]\s*)(?:rg|grep|findstr|ag|ack|Select-String|sls)\b/i.test(normalized) ||
+    /(?:^|[|;&]\s*)git\s+grep\b/i.test(normalized);
 }
 
 function detectExpensiveTest(command: string, config: TokenOptConfig): string | undefined {

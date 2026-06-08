@@ -344,7 +344,8 @@ If Copilot still uses shell too much:
 - Confirm `.github/copilot-instructions.md` contains the TokenOpt block.
 - Prompt explicitly: "Use TokenOpt MCP first."
 - Ask it to call `tokenopt_compile_evidence` by name.
-- Remove broad shell permissions only if your Copilot surface supports that control.
+- For business/domain prompts, make sure the packet is `task_type=research_business`; it should include business purpose, likely users, core capabilities, major project areas, domain terms, and final-answer sections.
+- Remove or restrict broad shell permissions only if your Copilot surface supports that control. TokenOpt's current Copilot support is MCP + instructions, not native Copilot hook enforcement.
 
 ## References
 

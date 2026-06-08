@@ -53,8 +53,14 @@ interface SearchProviderResult {
   diagnostics: string[];
 }
 
+interface RepositoryOverview {
+  file: string;
+  title: string;
+  summary: string;
+}
+
 const SERVER_INSTRUCTIONS =
-  "TokenOpt provides bounded repo tools and an evidence compiler. Start with tokenopt_compile_evidence for onboarding/build-handoff tasks. If it returns answerable=true, answer from the packet instead of replaying searches. Use tokenopt_search/read_file only for exact gaps and tokenopt_run_command for tests/builds so raw output is archived and model-visible output stays compact.";
+  "TokenOpt provides bounded repo tools and an evidence compiler. Start with tokenopt_compile_evidence for repo understanding, business/domain deep dives, onboarding/build handoffs, investigations, implementation planning, and test planning. If it returns answerable=true, answer from the packet instead of replaying shell/search/read calls. Use tokenopt_search/read_file only for exact gaps and tokenopt_run_command for tests/builds so raw output is archived and model-visible output stays compact.";
 
 export async function runMcpServer(): Promise<void> {
   const server = new Server(
@@ -247,6 +253,12 @@ function compileEvidenceTool(args: Record<string, unknown>) {
   const hasBuildFacts = facts.some((fact) => fact.startsWith("build_tool="));
   const overview = extractRepositoryOverview(loaded.repoRoot);
   const structureFacts = extractStructureFacts(inventory);
+  const evidenceContext: EvidenceContext = {
+    inventory,
+    facts,
+    overview,
+    structureFacts
+  };
   const now = new Date();
   const expiresAt = new Date(now.getTime() + 10 * 60 * 1000);
   const evidence: EvidenceItem[] = [
@@ -292,7 +304,7 @@ function compileEvidenceTool(args: Record<string, unknown>) {
     tokens_est: estimateTokens(structureFacts.join("\n"))
   });
 
-  const taskSpecific = compileTaskSpecificEvidence(taskType, task, loaded.repoRoot, evidence.length + 1);
+  const taskSpecific = compileTaskSpecificEvidence(taskType, task, loaded.repoRoot, evidence.length + 1, evidenceContext);
   if (taskSpecific) {
     evidence.push(...taskSpecific.evidence);
   }
@@ -341,7 +353,17 @@ function compileEvidenceTool(args: Record<string, unknown>) {
     missing,
     allowed_followups: allowedFollowups,
     disallowed_followups: answerable
-      ? ["tokenopt_search", "tokenopt_read_file", "tokenopt_project_facts", "tokenopt_run_command", "shell_rg"]
+      ? [
+          "tokenopt_search",
+          "tokenopt_read_file",
+          "tokenopt_project_facts",
+          "tokenopt_run_command",
+          "shell_rg",
+          "shell_grep",
+          "shell_git_grep",
+          "shell_findstr",
+          "raw_shell_search"
+        ]
       : ["repo_wide_rg_files", "full_file_reads", "full_suite_tests_without_target"],
     recommended_next_action: answerable ? "answer_now" : "expand_exact",
     max_additional_calls: answerable ? 0 : 3,
@@ -357,7 +379,7 @@ function compileEvidenceTool(args: Record<string, unknown>) {
   const statePath = answerable ? writeEvidenceTaskState(loaded.config, loaded.repoRoot, packet) : undefined;
   appendEvent(loaded.config, {
     timestamp: now.toISOString(),
-    source: "cli",
+    source: "mcp",
     eventName: "compile-evidence",
     repoRoot: loaded.repoRoot,
     action: "evidence",
@@ -459,18 +481,7 @@ function isRepoWideFileListing(command: string): boolean {
   return /^rg\s+--files\b/i.test(command.trim());
 }
 
-function buildRepoInventory(cwd: string, config: TokenOptConfig, repoRoot: string): {
-  totalFiles: number;
-  rawChars: number;
-  rawArtifact: string;
-  estimatedTokensAvoided: number;
-  searchProvider: SearchProvider;
-  diagnostics: string[];
-  topDirs: Array<[string, number]>;
-  topExtensions: Array<[string, number]>;
-  rootFiles: string[];
-  importantFiles: string[];
-} {
+function buildRepoInventory(cwd: string, config: TokenOptConfig, repoRoot: string): RepoInventory {
   const listing = collectRepoFiles(cwd, repoRoot);
   const files = listing.files;
   const raw = [
@@ -996,16 +1007,358 @@ interface TaskSpecificEvidence {
   allowedFollowups: EvidenceFollowup[];
 }
 
+interface EvidenceContext {
+  inventory: RepoInventory;
+  facts: string[];
+  overview?: RepositoryOverview;
+  structureFacts: string[];
+}
+
+interface BusinessProfile {
+  files: string[];
+  purpose: string;
+  likelyUsers: string;
+  coreCapabilities: string[];
+  majorAreas: string[];
+  domainTerms: string[];
+  docSignals: string[];
+  hasPurposeSignal: boolean;
+  hasDeepDiveSignal: boolean;
+}
+
 function compileTaskSpecificEvidence(
   taskType: EvidenceTaskType,
   task: string,
   repoRoot: string,
-  firstEvidenceIndex: number
+  firstEvidenceIndex: number,
+  context: EvidenceContext
 ): TaskSpecificEvidence | undefined {
   if (taskType === "review_diff") {
     return compileReviewDiffEvidence(task, repoRoot, firstEvidenceIndex);
   }
+  if (taskType === "research_business") {
+    return compileBusinessResearchEvidence(task, repoRoot, firstEvidenceIndex, context);
+  }
   return undefined;
+}
+
+function compileBusinessResearchEvidence(
+  task: string,
+  repoRoot: string,
+  firstEvidenceIndex: number,
+  context: EvidenceContext
+): TaskSpecificEvidence {
+  const profile = extractBusinessProfile(repoRoot, context);
+  const answerable = profile.hasPurposeSignal && profile.hasDeepDiveSignal;
+  const confidence = answerable ? (profile.docSignals.length >= 3 ? 0.88 : 0.82) : 0.58;
+  const needsDeepDive = /\b(deep\s*dive|detail|detailed|explain|study)\b/i.test(task);
+
+  return {
+    answerable,
+    confidence,
+    coverage: {
+      repository_purpose: profile.hasPurposeSignal ? "covered" : "partial",
+      business_deep_dive: profile.hasDeepDiveSignal ? "covered" : needsDeepDive ? "partial" : "covered",
+      likely_users: profile.likelyUsers ? "covered" : "partial",
+      core_capabilities: profile.coreCapabilities.length > 0 ? "covered" : "partial",
+      major_project_areas: profile.majorAreas.length > 0 ? "covered" : "missing",
+      source_grounding: profile.files.length > 0 ? "covered" : "partial"
+    },
+    evidence: [
+      {
+        id: `E${firstEvidenceIndex}`,
+        claim: "Business/domain profile was synthesized deterministically from root docs, docs headings, package/build identity, and bounded repo inventory.",
+        files: profile.files,
+        facts: [
+          `business_purpose=${profile.purpose}`,
+          `likely_users=${profile.likelyUsers}`,
+          `core_capabilities=${profile.coreCapabilities.join(" | ") || "none_detected"}`,
+          `major_project_areas=${profile.majorAreas.join(" | ") || "none_detected"}`,
+          `domain_terms=${profile.domainTerms.join(",") || "none_detected"}`,
+          `doc_signals=${profile.docSignals.join(" | ") || "none_detected"}`,
+          `build_identity=${context.facts.slice(0, 8).join(" | ")}`,
+          `structure_signals=${context.structureFacts.join(" | ")}`
+        ],
+        tokens_est: 420
+      },
+      {
+        id: `E${firstEvidenceIndex + 1}`,
+        claim: "Answer contract for business deep-dive tasks is available without shell fallback.",
+        facts: [
+          "final_answer_sections=What this business/product is; Who it serves; Why it exists; How the system supports it; Core capabilities; Major code/project areas; Confidence and gaps",
+          "quality_bar=explain business in plain language, then map claims back to evidence IDs and files",
+          "fallback_policy=do_not_use_shell_or_grep_after_answerable_packet",
+          "if_more_detail_needed=ask a narrower follow-up or use allowed TokenOpt followups only when answerable=false"
+        ],
+        tokens_est: 120
+      }
+    ],
+    missing: answerable
+      ? []
+      : [
+          "Business purpose or domain details are only partially evident from deterministic docs/inventory.",
+          "Use exact TokenOpt searches for named product/domain terms from README/docs; do not use raw shell grep."
+        ],
+    allowedFollowups: answerable
+      ? []
+      : [
+          {
+            tool: "tokenopt_search",
+            reason: "Search for exact business/domain terms from README or docs, scoped to docs/source areas.",
+            args: {
+              pattern: profile.domainTerms[0] ?? "<exact-domain-term>",
+              path: profile.files.find((file) => file.startsWith("docs/")) ? "docs" : "."
+            },
+            max_output_tokens: 700
+          },
+          {
+            tool: "tokenopt_read_file",
+            reason: "Read a bounded slice of the most relevant README/docs/source file.",
+            args: { path: profile.files[0] ?? "README.md", startLine: 1, maxLines: 160 },
+            max_output_tokens: 900
+          }
+        ]
+  };
+}
+
+function extractBusinessProfile(repoRoot: string, context: EvidenceContext): BusinessProfile {
+  const docs = collectBusinessDocs(repoRoot, context.overview?.file);
+  const purpose = cleanFactValue(
+    context.overview?.summary ||
+      docs.snippets[0] ||
+      context.facts.find((fact) => /(?:package_name|artifact_id|root_project)/i.test(fact)) ||
+      "purpose_not_explicit_in_root_docs"
+  );
+  const combinedText = [
+    context.overview?.title,
+    context.overview?.summary,
+    docs.headings.join(" "),
+    docs.snippets.join(" "),
+    context.facts.join(" "),
+    context.inventory.importantFiles.join(" ")
+  ].filter(Boolean).join("\n");
+  const domainTerms = extractDomainTerms(combinedText, context.inventory.importantFiles, 14);
+  const majorAreas = extractMajorBusinessAreas(context.inventory);
+  const coreCapabilities = extractCoreCapabilities(docs.headings, majorAreas, domainTerms);
+  const likelyUsers = inferLikelyUsers(combinedText, context.facts);
+  const docSignals = [
+    ...(context.overview ? [`${context.overview.file}: ${context.overview.title}`] : []),
+    ...docs.headings.slice(0, 8)
+  ].map(cleanFactValue).filter(Boolean);
+
+  return {
+    files: uniqueStrings([
+      ...(context.overview ? [context.overview.file] : []),
+      ...docs.files,
+      ...context.inventory.importantFiles
+        .filter((file) => /(^|\/)(docs|src|server|client|app|lib|core|modules|plugins|x-pack|hadoop-[^/]+)(\/|$)/i.test(file))
+        .slice(0, 12)
+    ]),
+    purpose,
+    likelyUsers,
+    coreCapabilities,
+    majorAreas,
+    domainTerms,
+    docSignals,
+    hasPurposeSignal: purpose !== "purpose_not_explicit_in_root_docs",
+    hasDeepDiveSignal: majorAreas.length > 0 || coreCapabilities.length > 0 || domainTerms.length >= 4 || docs.headings.length >= 3
+  };
+}
+
+function collectBusinessDocs(repoRoot: string, overviewFile: string | undefined): {
+  files: string[];
+  headings: string[];
+  snippets: string[];
+} {
+  const candidates = findBusinessDocCandidates(repoRoot, overviewFile);
+  const files: string[] = [];
+  const headings: string[] = [];
+  const snippets: string[] = [];
+
+  for (const relativePath of candidates) {
+    const text = readRepoText(repoRoot, relativePath);
+    if (!text) {
+      continue;
+    }
+    files.push(relativePath);
+    const normalized = text.replace(/\r\n/g, "\n").slice(0, 120_000);
+    headings.push(
+      ...normalized
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => /^#{1,4}\s+\S|^={1,3}\s+\S/.test(line))
+        .map(cleanOverviewLine)
+        .filter((line) => line.length >= 4)
+        .slice(0, 8)
+    );
+    snippets.push(...extractDocSnippets(normalized).slice(0, 3));
+  }
+
+  return {
+    files: uniqueStrings(files).slice(0, 12),
+    headings: uniqueStrings(headings).slice(0, 18),
+    snippets: uniqueStrings(snippets).slice(0, 10)
+  };
+}
+
+function findBusinessDocCandidates(repoRoot: string, overviewFile: string | undefined): string[] {
+  const candidates = new Set<string>();
+  for (const relativePath of [
+    overviewFile,
+    "README.md",
+    "README.asciidoc",
+    "README.adoc",
+    "README",
+    "docs/README.md",
+    "docs/index.md",
+    "docs/index.asciidoc",
+    "docs/index.adoc"
+  ]) {
+    if (relativePath) {
+      candidates.add(relativePath);
+    }
+  }
+
+  const docsDir = path.join(repoRoot, "docs");
+  if (fs.existsSync(docsDir) && fs.statSync(docsDir).isDirectory()) {
+    for (const entry of fs.readdirSync(docsDir).sort()) {
+      if (/\.(?:md|adoc|asciidoc)$/i.test(entry)) {
+        candidates.add(path.join("docs", entry).replace(/\\/g, "/"));
+      }
+      if (candidates.size >= 16) {
+        break;
+      }
+    }
+  }
+
+  return [...candidates].filter((relativePath) => {
+    const filePath = path.join(repoRoot, relativePath);
+    try {
+      return fs.existsSync(filePath) && fs.statSync(filePath).isFile();
+    } catch {
+      return false;
+    }
+  }).slice(0, 14);
+}
+
+function extractDocSnippets(text: string): string[] {
+  const paragraphs = text
+    .replace(/```[\s\S]*?```/g, " ")
+    .split(/\n\s*\n/)
+    .map((paragraph) => cleanFactValue(paragraph.replace(/\n/g, " ")))
+    .filter((paragraph) => paragraph.length >= 60 && !/^#{1,6}\s+/.test(paragraph) && !/^\|/.test(paragraph));
+  return paragraphs.map((paragraph) => paragraph.slice(0, 420));
+}
+
+function extractDomainTerms(text: string, paths: string[], limit: number): string[] {
+  const stopWords = new Set([
+    "about",
+    "after",
+    "also",
+    "build",
+    "class",
+    "client",
+    "code",
+    "common",
+    "config",
+    "docs",
+    "file",
+    "from",
+    "gradle",
+    "guide",
+    "http",
+    "java",
+    "javascript",
+    "main",
+    "module",
+    "package",
+    "project",
+    "readme",
+    "server",
+    "source",
+    "system",
+    "test",
+    "that",
+    "this",
+    "tools",
+    "typescript",
+    "with"
+  ]);
+  const counts = new Map<string, number>();
+  const addToken = (token: string, weight = 1) => {
+    const normalized = token.toLowerCase().replace(/^[^a-z0-9]+|[^a-z0-9]+$/g, "");
+    if (normalized.length < 4 || stopWords.has(normalized) || /^\d+$/.test(normalized)) {
+      return;
+    }
+    counts.set(normalized, (counts.get(normalized) ?? 0) + weight);
+  };
+
+  for (const match of text.matchAll(/[A-Za-z][A-Za-z0-9-]{3,}/g)) {
+    addToken(match[0], 2);
+  }
+  for (const filePath of paths.slice(0, 80)) {
+    for (const segment of filePath.split(/[\\/_.-]+/)) {
+      addToken(segment, 1);
+    }
+  }
+
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, limit)
+    .map(([term]) => term);
+}
+
+function extractMajorBusinessAreas(inventory: RepoInventory): string[] {
+  return inventory.topDirs
+    .filter(([name]) => name !== "<root>" && !/^(?:\.github|\.idea|node_modules|dist|build|target|coverage)$/i.test(name))
+    .slice(0, 10)
+    .map(([name, count]) => `${name}:${count}`);
+}
+
+function extractCoreCapabilities(headings: string[], majorAreas: string[], domainTerms: string[]): string[] {
+  const headingCapabilities = headings
+    .filter((heading) => !/^(?:overview|getting started|installation|build|contributing|license)$/i.test(heading))
+    .slice(0, 6);
+  const areaCapabilities = majorAreas.slice(0, 5).map((area) => `project area ${area}`);
+  const termCapabilities = domainTerms.slice(0, 5).map((term) => `domain term ${term}`);
+  return uniqueStrings([...headingCapabilities, ...areaCapabilities, ...termCapabilities]).slice(0, 10);
+}
+
+function inferLikelyUsers(text: string, facts: string[]): string {
+  const haystack = `${text}\n${facts.join("\n")}`.toLowerCase();
+  const users: string[] = [];
+  if (/\b(developer|sdk|api|plugin|client|library|framework)\b/.test(haystack)) {
+    users.push("developers/integrators");
+  }
+  if (/\b(operator|admin|administrator|cluster|deployment|production|platform)\b/.test(haystack)) {
+    users.push("operators/platform teams");
+  }
+  if (/\b(customer|merchant|business|enterprise|organization|user|consumer)\b/.test(haystack)) {
+    users.push("business users/customers");
+  }
+  if (/\b(data|analytics|search|query|index|warehouse|mapreduce|hdfs|yarn)\b/.test(haystack)) {
+    users.push("data/search practitioners");
+  }
+  return uniqueStrings(users).join(", ") || "not explicit; infer from repository purpose and major areas";
+}
+
+function cleanFactValue(value: string): string {
+  return value.replace(/\s+/g, " ").replace(/[`\u0000-\u001f]/g, "").trim().slice(0, 700);
+}
+
+function uniqueStrings(values: string[]): string[] {
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  for (const value of values) {
+    const normalized = value.trim();
+    const key = normalized.toLowerCase();
+    if (!normalized || seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    unique.push(normalized);
+  }
+  return unique;
 }
 
 function compileReviewDiffEvidence(task: string, repoRoot: string, firstEvidenceIndex: number): TaskSpecificEvidence {
@@ -1171,6 +1524,9 @@ function inferTaskType(task: string): EvidenceTaskType {
   if (/\b(business|product|domain|customer|research|purpose|what does this repo do)\b/i.test(task)) {
     return "research_business";
   }
+  if (/\b(?:study|deep\s*dive|understand)\b.*\b(?:business|product|domain|repo|repository)\b/i.test(task)) {
+    return "research_business";
+  }
   if (/\b(investigate|debug|diagnose|root cause|why|triage)\b/i.test(task)) {
     return "investigate";
   }
@@ -1294,6 +1650,7 @@ function formatEvidencePacket(packet: EvidencePacket, statePath: string | undefi
   const lines = [
     "TokenOpt compiled evidence packet",
     `packet_id: ${packet.packet_id}`,
+    `task_type: ${packet.task_type}`,
     `answerable: ${packet.answerable}`,
     `confidence: ${packet.confidence}`,
     `recommended_next_action: ${packet.recommended_next_action}`,
@@ -1332,7 +1689,7 @@ function estimateTokens(text: string): number {
   return Math.max(1, Math.ceil(text.length / 4));
 }
 
-function extractRepositoryOverview(repoRoot: string): { file: string; title: string; summary: string } | undefined {
+function extractRepositoryOverview(repoRoot: string): RepositoryOverview | undefined {
   for (const candidate of ["README.md", "README.asciidoc", "README.adoc", "README"]) {
     const text = readRepoText(repoRoot, candidate);
     if (!text) {
