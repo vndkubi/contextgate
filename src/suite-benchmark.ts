@@ -404,7 +404,7 @@ function runCodexSuiteBenchmark(
       "-c",
       "mcp_servers.tokenopt.command='node'",
       "-c",
-      `mcp_servers.tokenopt.args=['${slash(path.join(process.cwd(), "dist", "cli.js"))}','mcp']`
+      `mcp_servers.tokenopt.args=['${slash(path.join(process.cwd(), "dist", "cli.js"))}','mcp','--mode','lite']`
     );
   }
 
@@ -465,11 +465,11 @@ function buildSuitePrompt(repo: string, task: SuiteTask, mode: SuiteBenchmarkMod
   }
 
   const taskType = inferTaskType(task);
-  const packetTokens = task.maxBudget?.packetTokens ?? 2000;
+  const packetTokens = task.maxBudget?.packetTokens ?? 1200;
   if (mode === "router-strict") {
     const routerPlan =
       taskType === "review_diff"
-        ? "review_diff -> call tokenopt_compile_evidence first; if answerable=true, answer from the packet with zero followups; if answerable=false, use at most one exact TokenOpt search/read pair for the changed method and likely tests."
+        ? "review_diff -> use tokenopt_compile_evidence only when the diff is concrete enough to replace exploration; if answerable=true, answer from the packet with zero followups; if answerable=false, use at most one exact TokenOpt search/read pair for the changed method and likely tests."
         : `${taskType} -> shell disabled; use tokenopt_compile_evidence first, then exact TokenOpt search/read followups only for missing named files, routes, symbols, or tests.`;
     return [
       ...common,
@@ -484,19 +484,21 @@ function buildSuitePrompt(repo: string, task: SuiteTask, mode: SuiteBenchmarkMod
     const deterministicReview = hasDeterministicReviewSupport(task);
     const routerPlan =
       taskType === "review_diff" && !deterministicReview
-        ? "review_diff without a concrete supported diff -> call tokenopt_compile_evidence first, then use bounded targeted shell/MCP fallback only for exact changed symbols, files, and tests."
+        ? "review_diff without a concrete supported diff -> skip MCP-first and use bounded targeted shell fallback for exact changed symbols, files, and tests."
         : taskType === "review_diff"
           ? "supported review_diff -> call tokenopt_compile_evidence first; if answerable=true, answer from the packet with zero followups."
           : `${taskType} -> shell disabled; use tokenopt_compile_evidence first, then exact TokenOpt search/read followups only for missing named files, routes, symbols, or tests.`;
     const shellPolicy =
       taskType === "review_diff" && !deterministicReview
-        ? "- Bounded shell fallback is allowed only after TokenOpt cannot prove the review from the packet."
+        ? "- Bounded shell fallback is allowed; do not add MCP-first when TokenOpt cannot prove the review from the packet."
         : "- Do not call shell; it is disabled in this benchmark mode for this task.";
     return [
       ...common,
       "- TokenOpt router selected the cheapest safe acquisition profile for this task.",
       `- Router plan: ${routerPlan}`,
-      `- Call tokenopt_compile_evidence with cwd=${repo}, task_type=${taskType}, and budget_tokens around ${packetTokens}.`,
+      deterministicReview || taskType !== "review_diff"
+        ? `- Call tokenopt_compile_evidence with cwd=${repo}, task_type=${taskType}, and budget_tokens around ${packetTokens}.`
+        : "- Do not call tokenopt_compile_evidence for this task; avoid MCP+shell double-spend.",
       shellPolicy,
       "- Preserve the requested JSON contract. Include unresolved risks when evidence is incomplete."
     ].join("\n");

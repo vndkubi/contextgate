@@ -114,6 +114,7 @@ test("instruction emitter and installer produce idempotent MCP guidance", () => 
   const agentsText = fs.readFileSync(agentsPath, "utf8");
   assert.equal((agentsText.match(/tokenopt:mcp-instructions:start/g) ?? []).length, 1);
   assert.match(agentsText, /Do not bypass TokenOpt with shell fallback/);
+  assert.match(agentsText, /MCP\+shell double-spend/);
 
   const copilotPath = installTokenOptInstructions(repo, "copilot");
   assert.equal(copilotPath, path.join(repo, ".github", "copilot-instructions.md"));

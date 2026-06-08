@@ -72,7 +72,7 @@ npx.cmd -y @openai/codex@0.137.0 exec `
   -C D:\Personal\Projects\tokenopt `
   -c "mcp_servers.tokenopt.command='node'" `
   -c "mcp_servers.tokenopt.args=['D:/Personal/Projects/tokenopt/dist/cli.js','mcp','--mode','lite']" `
-  "Use tokenopt_compile_evidence first, then answer from the packet if answerable=true."
+  "Use TokenOpt as a cost gate: call tokenopt_compile_evidence only when it can replace broad exploration, then answer from the packet if answerable=true."
 ```
 
 TokenOpt MCP defaults to lite mode so the MCP tool schemas do not cost more context than they save. Lite mode exposes:
@@ -91,7 +91,7 @@ node D:\Personal\Projects\tokenopt\dist\cli.js mcp --mode full
 
 ## Agent Instructions
 
-MCP only exposes tools. The agent also needs instructions that tell it to call TokenOpt first and stop after an answerable packet.
+MCP only exposes tools. The agent also needs instructions that tell it when TokenOpt is cheaper than normal exploration, and when to skip MCP-first to avoid double-spending context.
 
 Preview the reusable instruction snippet:
 
@@ -127,14 +127,15 @@ Running install again updates the existing block instead of appending duplicates
 Expected agent flow:
 
 ```text
-1. Call tokenopt_compile_evidence({ task, task_type, cwd, budget_tokens, quality_rubric })
-2. If answerable=true and recommended_next_action=answer_now, answer from the packet.
-3. If missing items exist, use only allowed_followups.
-4. Redundant MCP exploration after answerable=true is gated.
-5. With Codex hooks trusted, shell grep/search after a packet is denied when TokenOpt has already provided answer-now guidance or exact TokenOpt followups.
+1. Use TokenOpt first only when it can replace broad exploration.
+2. Call tokenopt_compile_evidence({ task, task_type, cwd, budget_tokens, quality_rubric })
+3. If answerable=true and recommended_next_action=answer_now, answer from the packet.
+4. If missing items exist, use only allowed_followups in strict MCP-only mode; in shell-enabled sessions, do not do MCP-first plus shell fallback for exact code-flow/class/PBI tasks.
+5. Redundant MCP exploration after answerable=true is gated.
+6. With Codex hooks trusted, shell grep/search after a packet is denied when TokenOpt has already provided answer-now guidance or exact TokenOpt followups.
 ```
 
-For prompts such as "understand checkout flow end-to-end so I can draw Mermaid", TokenOpt infers `task_type=api_flow`, identifies candidate entrypoints/services/tests/docs, returns a diagram contract, quality checks, and requires exact `tokenopt_search`/`tokenopt_read_file` followups before the final diagram. For prompts such as "study business and deep dive that business", TokenOpt infers `task_type=research_business` and includes business purpose, likely users, core capabilities, major project areas, domain terms, doc signals, required sections, evidence rules, and final-answer quality checks in the evidence packet.
+For prompts such as "understand checkout flow end-to-end so I can draw Mermaid", use TokenOpt only in strict MCP-only mode or when the packet can provide the full evidence path. In normal shell-enabled agent mode, start with narrow native search/read instead of calling TokenOpt first and then repeating the same work through shell. For prompts such as "study business and deep dive that business", TokenOpt can be useful because docs/inventory often provide enough evidence without shell fallback.
 
 `tokenopt_compile_evidence` defaults to compact output. Full evidence is saved in `state_path`; pass `detail=full` only when debugging or producing a benchmark/audit report.
 

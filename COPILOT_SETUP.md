@@ -162,10 +162,10 @@ AGENTS.md
 
 The installed block tells Copilot:
 
-- Call `tokenopt_compile_evidence` first.
+- Use TokenOpt as a cost gate; call `tokenopt_compile_evidence` first only when it can replace broad exploration.
 - Use the right task type, such as `build_handoff`, `investigate`, `research_business`, `implement`, or `write_unittest`.
 - If `answerable=true`, answer from the packet and do not run more shell/search calls.
-- If `missing` is non-empty, use only `allowed_followups`.
+- If `missing` is non-empty, use only `allowed_followups` in strict MCP-only mode. In normal shell-enabled sessions, avoid MCP-first plus shell fallback for exact code-flow/class/PBI tasks.
 
 The user does not need to mention `tokenopt_compile_evidence` in normal prompts. After setup, prompts such as:
 
@@ -196,8 +196,8 @@ Inside Copilot CLI, check MCP status:
 Then prompt:
 
 ```text
-Use TokenOpt MCP first.
-Call tokenopt_compile_evidence with task_type=build_handoff for this repo.
+Use TokenOpt as a cost gate.
+Call tokenopt_compile_evidence with task_type=build_handoff for this repo because this is a broad handoff task.
 If answerable=true, answer from the packet and do not call shell/search again.
 ```
 
@@ -314,10 +314,10 @@ The core TokenOpt state model is already reusable for this, but the Copilot inpu
 Use this prompt pattern in Copilot:
 
 ```text
-Use TokenOpt MCP first.
-Call tokenopt_compile_evidence for this task.
+Use TokenOpt as a cost gate.
+Call tokenopt_compile_evidence only if it can replace broad exploration for this task.
 If answerable=true and missing=[], answer from the evidence packet and do not call shell/search again.
-If missing is non-empty, use only allowed_followups from the packet.
+If missing is non-empty, use only allowed_followups in strict MCP-only mode; otherwise do not repeat MCP acquisition through shell.
 
 Task: <your actual task>
 ```
@@ -342,9 +342,9 @@ Check:
 If Copilot still uses shell too much:
 
 - Confirm `.github/copilot-instructions.md` contains the TokenOpt block.
-- Prompt explicitly: "Use TokenOpt MCP first."
+- Prompt explicitly for broad tasks: "Use TokenOpt as a cost gate; call tokenopt_compile_evidence only if it can replace broad exploration."
 - Ask it to call `tokenopt_compile_evidence` by name.
-- For existing-flow prompts, make sure the packet is `task_type=api_flow`; it should include candidate entrypoints/services/tests/docs, a diagram contract, and exact TokenOpt followups before the final Mermaid/flowchart answer.
+- For existing-flow prompts in shell-enabled sessions, do not force MCP-first if the answer still needs line-level code proof. Use native narrow search/read directly, or run a strict MCP-only session.
 - For business/domain prompts, make sure the packet is `task_type=research_business`; it should include business purpose, likely users, core capabilities, major project areas, domain terms, and final-answer sections.
 - Remove or restrict broad shell permissions only if your Copilot surface supports that control. TokenOpt's current Copilot support is MCP + instructions, not native Copilot hook enforcement.
 

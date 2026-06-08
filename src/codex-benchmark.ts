@@ -319,7 +319,7 @@ function runCodexBenchmark(
       "-c",
       "mcp_servers.tokenopt.command='node'",
       "-c",
-      `mcp_servers.tokenopt.args=['${slash(path.join(process.cwd(), "dist", "cli.js"))}','mcp']`
+      `mcp_servers.tokenopt.args=['${slash(path.join(process.cwd(), "dist", "cli.js"))}','mcp','--mode','lite']`
     );
   }
 
@@ -389,11 +389,12 @@ function buildPromptParts(repo: string, task: CodexTask, mode: CodexBenchmarkMod
     const injectedInstruction = [
       "Project instruction injected by TokenOpt setup:",
       "The user may ask naturally and does not need to name MCP tools.",
-      "When TokenOpt MCP tools are available, use tokenopt_compile_evidence as the first context acquisition path for repository investigation, requirement/PBI planning, implementation handoff, and unit-test handoff tasks.",
-      "Infer the task_type from the natural-language user request.",
-      `For this request, the benchmark oracle classifies the task_type as ${task.taskType}; call tokenopt_compile_evidence with cwd=${repo}, task=<verbatim user request>, task_type=${task.taskType}, budget_tokens around 1800, and a concrete quality_rubric.`,
+      "Use TokenOpt as a cost gate, not a mandatory extra step before normal tools.",
+      "Call tokenopt_compile_evidence only when it can replace broad exploration. If this is an exact code-flow/class/PBI deep dive and native shell/search would still be needed, skip MCP-first in shell-enabled sessions.",
+      "This benchmark disables shell for TokenOpt modes, so strict MCP-only acquisition is acceptable here.",
+      `For this request, if TokenOpt is appropriate, the benchmark oracle classifies the task_type as ${task.taskType}; call tokenopt_compile_evidence with cwd=${repo}, task=<verbatim user request>, task_type=${task.taskType}, budget_tokens around 1200, and a concrete quality_rubric.`,
       "If tokenopt_compile_evidence returns answerable=true, answer from the packet and do not call shell/search/read tools just to verify the same evidence.",
-      "If missing is non-empty, use only allowed_followups from the packet.",
+      "If missing is non-empty, use only allowed_followups from the packet and report unresolved evidence honestly.",
       outputContract
     ].join("\n");
     return {
@@ -410,7 +411,7 @@ function buildPromptParts(repo: string, task: CodexTask, mode: CodexBenchmarkMod
 
   const injectedInstruction = [
     "You must use the TokenOpt MCP tool tokenopt_compile_evidence first.",
-    `Call it with cwd=${repo}, task_type=${task.taskType}, and a budget around 1800 tokens.`,
+    `Call it with cwd=${repo}, task_type=${task.taskType}, and a budget around 1200 tokens.`,
     gateLine,
     outputContract
   ].join("\n");

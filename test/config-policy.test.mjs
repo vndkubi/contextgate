@@ -101,7 +101,8 @@ test("user prompt injects TokenOpt MCP routing guidance for natural tasks", () =
   );
   assert.equal(decision.action, "context");
   assert.match(decision.additionalContext, /tokenopt_compile_evidence/);
-  assert.match(decision.additionalContext, /inferred task_type/);
+  assert.match(decision.additionalContext, /cost gate/);
+  assert.match(decision.additionalContext, /MCP\+shell double-spend/);
 });
 
 test("mcp lockfile reads are denied", () => {

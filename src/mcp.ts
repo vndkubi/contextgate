@@ -65,7 +65,7 @@ interface RepositoryOverview {
 }
 
 const SERVER_INSTRUCTIONS =
-  "Use tokenopt_compile_evidence first for repo/flow/business/plan/test tasks. If answerable=true, answer from it. If false, use only its allowed TokenOpt followups.";
+  "TokenOpt is a cost gate. Use compile_evidence when it replaces broad exploration; skip MCP-first for exact code-flow/class/PBI tasks if shell/search will still be needed. If answerable=true, answer with zero redundant tools.";
 
 export async function runMcpServer(): Promise<void> {
   const server = new Server(

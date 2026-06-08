@@ -34,7 +34,7 @@ export const DEFAULT_CONFIG: TokenOptConfig = {
   context: {
     enableSecretBlock: true,
     userPromptGuidance:
-      "TokenOpt is active. When tokenopt MCP tools are available, treat natural repo prompts such as investigate a flow, understand/draw a business flow, research business/domain, deep dive a product, plan, implement, write tests, review, or build handoff as a signal to call tokenopt_compile_evidence first with the inferred task_type. If the packet is answerable, answer from it instead of replaying shell/search/file reads; otherwise use only bounded followups."
+      "TokenOpt is active as a cost gate, not a mandatory extra step. Use tokenopt_compile_evidence first only when it can replace broad exploration, such as build handoff, repo overview, business/domain summary, implementation planning, or unit-test planning. In shell-enabled hybrid sessions, do not call TokenOpt first for exact code-flow/class/PBI deep dives if you will still need normal shell/search reads; use native narrow search/read directly or run strict MCP-only mode instead. If a TokenOpt packet is answerable, answer from it with zero redundant exploration; if it is not answerable, use only its bounded followups and avoid MCP+shell double-spend."
   },
   paths: {},
   codex: {
