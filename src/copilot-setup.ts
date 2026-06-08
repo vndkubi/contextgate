@@ -6,10 +6,14 @@ import { installTokenOptInstructions } from "./instruction-audit.js";
 
 export type CopilotSetupScope = "user" | "repo" | "both";
 
-export const TOKENOPT_COPILOT_MCP_TOOLS = [
+export const TOKENOPT_COPILOT_LITE_MCP_TOOLS = [
   "tokenopt_compile_evidence",
   "tokenopt_search",
-  "tokenopt_read_file",
+  "tokenopt_read_file"
+] as const;
+
+export const TOKENOPT_COPILOT_MCP_TOOLS = [
+  ...TOKENOPT_COPILOT_LITE_MCP_TOOLS,
   "tokenopt_run_command",
   "tokenopt_project_facts"
 ] as const;
@@ -37,7 +41,7 @@ export function setupCopilotProject(options: CopilotSetupOptions): CopilotSetupR
   const repoRoot = path.resolve(options.repoRoot);
   const scope = options.scope ?? "both";
   const installAgents = options.installAgents ?? true;
-  const includeRunCommand = options.includeRunCommand ?? true;
+  const includeRunCommand = options.includeRunCommand ?? false;
   const files: string[] = [];
   const warnings: string[] = [];
   const nextSteps: string[] = [];
@@ -74,7 +78,7 @@ export function setupCopilotProject(options: CopilotSetupOptions): CopilotSetupR
     warnings.push("AGENTS.md was skipped; Copilot can still use .github/copilot-instructions.md, but other agent surfaces may miss the TokenOpt guidance.");
   }
   if (!includeRunCommand) {
-    warnings.push("tokenopt_run_command was not allowlisted; builds/tests will not be routed through TokenOpt MCP.");
+    warnings.push("TokenOpt MCP was installed in lite mode; command execution and project_facts tools are not exposed unless you rerun setup with --include-run-command.");
   }
   warnings.push("Copilot hooks were not installed. TokenOpt does not ship a Copilot hook adapter yet; use MCP + instructions for Copilot today.");
 
@@ -96,17 +100,16 @@ export function installCopilotUserMcpConfig(options: {
 } = {}): string {
   const configPath = options.configPath ?? getCopilotMcpConfigPath();
   const tokenoptCliPath = normalizeJsonPath(path.resolve(options.tokenoptCliPath ?? getDefaultTokenOptCliPath()));
-  const includeRunCommand = options.includeRunCommand ?? true;
-  const tools = includeRunCommand
-    ? [...TOKENOPT_COPILOT_MCP_TOOLS]
-    : TOKENOPT_COPILOT_MCP_TOOLS.filter((tool) => tool !== "tokenopt_run_command");
+  const includeRunCommand = options.includeRunCommand ?? false;
+  const mode = includeRunCommand ? "full" : "lite";
+  const tools = includeRunCommand ? [...TOKENOPT_COPILOT_MCP_TOOLS] : [...TOKENOPT_COPILOT_LITE_MCP_TOOLS];
 
   const config = readJsonObject(configPath);
   const mcpServers = isRecord(config.mcpServers) ? { ...config.mcpServers } : {};
   mcpServers.tokenopt = {
     type: "local",
     command: "node",
-    args: [tokenoptCliPath, "mcp"],
+    args: [tokenoptCliPath, "mcp", "--mode", mode],
     env: {},
     tools
   };
@@ -130,15 +133,14 @@ export function getDefaultTokenOptCliPath(): string {
 }
 
 export function buildCopilotCloudMcpConfig(includeRunCommand = false): string {
-  const tools = includeRunCommand
-    ? [...TOKENOPT_COPILOT_MCP_TOOLS]
-    : TOKENOPT_COPILOT_MCP_TOOLS.filter((tool) => tool !== "tokenopt_run_command");
+  const mode = includeRunCommand ? "full" : "lite";
+  const tools = includeRunCommand ? [...TOKENOPT_COPILOT_MCP_TOOLS] : [...TOKENOPT_COPILOT_LITE_MCP_TOOLS];
   return `${JSON.stringify({
     mcpServers: {
       tokenopt: {
         type: "stdio",
         command: "npx",
-        args: ["-y", "@tokenopt/cli", "mcp"],
+        args: ["-y", "@tokenopt/cli", "mcp", "--mode", mode],
         tools
       }
     }

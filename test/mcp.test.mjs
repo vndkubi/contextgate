@@ -33,12 +33,34 @@ test("mcp exposes TokenOpt gated tools", async () => {
     const names = result.tools.map((tool) => tool.name).sort();
     assert.deepEqual(names, [
       "tokenopt_compile_evidence",
-      "tokenopt_project_facts",
       "tokenopt_read_file",
-      "tokenopt_run_command",
       "tokenopt_search"
     ]);
+
+    const hidden = await client.callTool({
+      name: "tokenopt_run_command",
+      arguments: { command: "echo hidden" }
+    });
+    assert.equal(hidden.isError ?? false, true);
+    assert.match(hidden.content[0].text, /not exposed in lite mode/);
   });
+});
+
+test("mcp full mode exposes command and project facts tools", async () => {
+  await withTokenOptMcp(
+    async (client) => {
+      const result = await client.listTools();
+      const names = result.tools.map((tool) => tool.name).sort();
+      assert.deepEqual(names, [
+        "tokenopt_compile_evidence",
+        "tokenopt_project_facts",
+        "tokenopt_read_file",
+        "tokenopt_run_command",
+        "tokenopt_search"
+      ]);
+    },
+    { env: { TOKENOPT_MCP_MODE: "full" } }
+  );
 });
 
 test("mcp falls back to bounded node scanner when rg and git are unavailable", async () => {
@@ -68,6 +90,7 @@ test("mcp falls back to bounded node scanner when rg and git are unavailable", a
     {
       cwd: repo,
       env: {
+        TOKENOPT_MCP_MODE: "full",
         PATH: "",
         Path: ""
       }
@@ -76,16 +99,19 @@ test("mcp falls back to bounded node scanner when rg and git are unavailable", a
 });
 
 test("mcp replaces broad command with bounded inventory", async () => {
-  await withTokenOptMcp(async (client) => {
-    const result = await client.callTool({
-      name: "tokenopt_run_command",
-      arguments: { command: "rg --files", cwd: process.cwd() }
-    });
-    assert.equal(result.isError ?? false, false);
-    assert.match(result.content[0].text, /TokenOpt replaced a raw repo-wide file listing/);
-    assert.match(result.content[0].text, /totalFiles:/);
-    assert.match(result.content[0].text, /rawArtifact:/);
-  });
+  await withTokenOptMcp(
+    async (client) => {
+      const result = await client.callTool({
+        name: "tokenopt_run_command",
+        arguments: { command: "rg --files", cwd: process.cwd() }
+      });
+      assert.equal(result.isError ?? false, false);
+      assert.match(result.content[0].text, /TokenOpt replaced a raw repo-wide file listing/);
+      assert.match(result.content[0].text, /totalFiles:/);
+      assert.match(result.content[0].text, /rawArtifact:/);
+    },
+    { env: { TOKENOPT_MCP_MODE: "full" } }
+  );
 });
 
 test("mcp compiles business deep-dive evidence and gates grep fallback", async () => {
@@ -159,7 +185,7 @@ test("mcp compiles business deep-dive evidence and gates grep fallback", async (
       assert.equal(gated.isError ?? false, false);
       assert.match(gated.content[0].text, /TokenOpt answerability gate/);
     },
-    { cwd: repo }
+    { cwd: repo, env: { TOKENOPT_MCP_MODE: "full" } }
   );
 });
 

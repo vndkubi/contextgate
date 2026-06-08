@@ -4,7 +4,12 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { getCliEntryPath } from "./codex-adapter.js";
-import { getCopilotMcpConfigPath, getDefaultTokenOptCliPath, TOKENOPT_COPILOT_MCP_TOOLS } from "./copilot-setup.js";
+import {
+  getCopilotMcpConfigPath,
+  getDefaultTokenOptCliPath,
+  TOKENOPT_COPILOT_LITE_MCP_TOOLS,
+  TOKENOPT_COPILOT_MCP_TOOLS
+} from "./copilot-setup.js";
 import { getCodexHooksPath } from "./install.js";
 import type { LoadedConfig } from "./types.js";
 
@@ -85,12 +90,31 @@ function inspectCopilotMcpConfig(filePath: string): Array<{ name: string; detail
   }
   const args = Array.isArray(server.args) ? server.args.filter((arg): arg is string => typeof arg === "string") : [];
   const tools = Array.isArray(server.tools) ? server.tools.filter((tool): tool is string => typeof tool === "string") : [];
-  const missingTools = TOKENOPT_COPILOT_MCP_TOOLS.filter((tool) => !tools.includes(tool));
+  const mode = inferCopilotMcpMode(server, args);
+  const expectedTools = mode === "full" ? TOKENOPT_COPILOT_MCP_TOOLS : TOKENOPT_COPILOT_LITE_MCP_TOOLS;
+  const missingTools = expectedTools.filter((tool) => !tools.includes(tool));
+  const expectedToolSet = new Set<string>(expectedTools);
+  const extraTools = tools.filter((tool) => !expectedToolSet.has(tool));
   return [
     check("tokenopt MCP command", String(server.command ?? "missing"), server.command === "node"),
     check("tokenopt MCP args", args.join(" "), args.some((arg) => /cli\.js$/i.test(arg)) && args.includes("mcp")),
-    check("tokenopt MCP tools", missingTools.length === 0 ? tools.join(",") : `missing ${missingTools.join(",")}`, missingTools.length === 0)
+    check("tokenopt MCP mode", mode, true),
+    check(
+      "tokenopt MCP tools",
+      missingTools.length === 0 && extraTools.length === 0 ? tools.join(",") : `missing ${missingTools.join(",") || "none"}; extra ${extraTools.join(",") || "none"}`,
+      missingTools.length === 0 && extraTools.length === 0
+    )
   ];
+}
+
+function inferCopilotMcpMode(server: Record<string, unknown>, args: string[]): "lite" | "full" {
+  const modeIndex = args.indexOf("--mode");
+  const argMode = modeIndex >= 0 ? args[modeIndex + 1] : undefined;
+  if (argMode === "full" || argMode === "lite") {
+    return argMode;
+  }
+  const env = isRecord(server.env) ? server.env : {};
+  return env.TOKENOPT_MCP_MODE === "full" ? "full" : "lite";
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

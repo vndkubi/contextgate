@@ -25,6 +25,10 @@ import type {
 
 type SearchProvider = "rg" | "git" | "node";
 type EvidenceDetail = "compact" | "full";
+type McpMode = "lite" | "full";
+
+const LITE_MCP_TOOL_NAMES = new Set(["tokenopt_compile_evidence", "tokenopt_search", "tokenopt_read_file"]);
+const FULL_MCP_TOOL_NAMES = new Set([...LITE_MCP_TOOL_NAMES, "tokenopt_run_command", "tokenopt_project_facts"]);
 
 interface RepoInventory {
   totalFiles: number;
@@ -77,8 +81,9 @@ export async function runMcpServer(): Promise<void> {
     }
   );
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: [
+  const mcpMode = normalizeMcpMode();
+  const exposedToolNames = getExposedMcpToolNames(mcpMode);
+  const allTools = [
       {
         name: "tokenopt_compile_evidence",
         title: "Compile Answerability Evidence",
@@ -219,11 +224,20 @@ export async function runMcpServer(): Promise<void> {
           openWorldHint: false
         }
       }
-    ]
+  ];
+
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({
+    tools: allTools.filter((tool) => exposedToolNames.has(tool.name))
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const args = request.params.arguments ?? {};
+    if (!exposedToolNames.has(request.params.name)) {
+      return textResult(
+        `TokenOpt MCP tool ${request.params.name} is not exposed in ${mcpMode} mode. Set TOKENOPT_MCP_MODE=full to enable command/project facts tools.`,
+        true
+      );
+    }
     try {
       switch (request.params.name) {
         case "tokenopt_compile_evidence":
@@ -2150,6 +2164,14 @@ function factSourceFiles(facts: string[]): string[] {
 
 function normalizeEvidenceDetail(value: string | undefined): EvidenceDetail {
   return value === "full" ? "full" : "compact";
+}
+
+function normalizeMcpMode(value = process.env.TOKENOPT_MCP_MODE): McpMode {
+  return value?.toLowerCase() === "full" ? "full" : "lite";
+}
+
+function getExposedMcpToolNames(mode: McpMode): Set<string> {
+  return mode === "full" ? FULL_MCP_TOOL_NAMES : LITE_MCP_TOOL_NAMES;
 }
 
 function buildEvidenceStructuredContent(packet: EvidencePacket, statePath: string, includePacket: boolean): Record<string, unknown> {

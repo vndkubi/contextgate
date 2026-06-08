@@ -26,11 +26,11 @@ node dist/cli.js doctor
 ```text
 tokenopt init
 tokenopt install codex --scope user|repo
-tokenopt setup copilot --scope user|repo|both [--no-agents] [--no-run-command]
-tokenopt install copilot --scope user|repo|both [--no-agents] [--no-run-command]
+tokenopt setup copilot --scope user|repo|both [--no-agents] [--include-run-command]
+tokenopt install copilot --scope user|repo|both [--no-agents] [--include-run-command]
 tokenopt hook codex user-prompt-submit|pre-tool-use|post-tool-use|pre-compact
 tokenopt exec -- <command...>
-tokenopt mcp
+tokenopt mcp [--mode lite|full]
 tokenopt benchmark daily --repo <path> [--task all] [--mode all] [--out results.json]
 tokenopt benchmark codex-daily --repo <path> [--mode all] [--out results.json]
 tokenopt instructions audit
@@ -59,18 +59,23 @@ shell_tool = false
 
 [mcp_servers.tokenopt]
 command = "node"
-args = ["D:\\Personal\\Projects\\tokenopt\\dist\\cli.js", "mcp"]
+args = ["D:\\Personal\\Projects\\tokenopt\\dist\\cli.js", "mcp", "--mode", "lite"]
 required = true
 default_tools_approval_mode = "approve"
 ```
 
-This exposes:
+By default, `tokenopt mcp` runs in `lite` mode to reduce MCP tool-schema/context overhead. Lite mode exposes:
 
 ```text
 tokenopt_compile_evidence
-tokenopt_run_command
 tokenopt_search
 tokenopt_read_file
+```
+
+Use `tokenopt mcp --mode full` only when you want command execution and standalone project facts exposed:
+
+```text
+tokenopt_run_command
 tokenopt_project_facts
 ```
 
@@ -101,7 +106,7 @@ node D:\Personal\Projects\tokenopt\dist\cli.js setup copilot --scope both
 node D:\Personal\Projects\tokenopt\dist\cli.js doctor copilot
 ```
 
-This installs `.github/copilot-instructions.md`, `AGENTS.md`, and merges a `tokenopt` stdio MCP server into `%USERPROFILE%\.copilot\mcp-config.json` using `node <absolute-tokenopt-cli-js> mcp`. It does not install Copilot hooks yet; TokenOpt's Copilot integration is MCP + instructions today.
+This installs `.github/copilot-instructions.md`, `AGENTS.md`, and merges a lite `tokenopt` stdio MCP server into `%USERPROFILE%\.copilot\mcp-config.json` using `node <absolute-tokenopt-cli-js> mcp --mode lite`. It does not install Copilot hooks yet; TokenOpt's Copilot integration is MCP + instructions today. Add `--include-run-command` only for repos where Copilot should run builds/tests through TokenOpt MCP.
 
 ## Benchmark
 

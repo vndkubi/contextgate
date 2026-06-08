@@ -86,8 +86,8 @@ node D:\Personal\Projects\tokenopt\dist\cli.js setup copilot --scope repo
 # Install local Copilot CLI MCP config and repo instructions, but skip AGENTS.md.
 node D:\Personal\Projects\tokenopt\dist\cli.js setup copilot --scope user --no-agents
 
-# Safer allowlist for environments where command execution should not be exposed.
-node D:\Personal\Projects\tokenopt\dist\cli.js setup copilot --scope user --no-run-command
+# Full mode for repos where Copilot should run builds/tests through TokenOpt MCP.
+node D:\Personal\Projects\tokenopt\dist\cli.js setup copilot --scope user --include-run-command
 ```
 
 The generated MCP entry uses:
@@ -96,7 +96,7 @@ The generated MCP entry uses:
 {
   "type": "local",
   "command": "node",
-  "args": ["D:/Personal/Projects/tokenopt/dist/cli.js", "mcp"]
+  "args": ["D:/Personal/Projects/tokenopt/dist/cli.js", "mcp", "--mode", "lite"]
 }
 ```
 
@@ -129,19 +129,19 @@ Add:
     "tokenopt": {
       "type": "local",
       "command": "node",
-      "args": ["D:/Personal/Projects/tokenopt/dist/cli.js", "mcp"],
+      "args": ["D:/Personal/Projects/tokenopt/dist/cli.js", "mcp", "--mode", "lite"],
       "env": {},
       "tools": [
         "tokenopt_compile_evidence",
         "tokenopt_search",
-        "tokenopt_read_file",
-        "tokenopt_run_command",
-        "tokenopt_project_facts"
+        "tokenopt_read_file"
       ]
     }
   }
 }
 ```
+
+Use `--mode full` and add `tokenopt_run_command`, `tokenopt_project_facts` only when command execution is intentionally exposed.
 
 ### 2. Add repo instructions
 
@@ -224,7 +224,8 @@ If you prefer interactive setup:
 Server Name: tokenopt
 Server Type: Local or STDIO
 Command: node D:/Personal/Projects/tokenopt/dist/cli.js mcp
-Tools: tokenopt_compile_evidence,tokenopt_search,tokenopt_read_file,tokenopt_run_command,tokenopt_project_facts
+Args: --mode lite
+Tools: tokenopt_compile_evidence,tokenopt_search,tokenopt_read_file
 ```
 
 4. Save with `Ctrl+S`.
@@ -258,12 +259,11 @@ Example cloud-compatible MCP JSON after publishing:
     "tokenopt": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "@tokenopt/cli", "mcp"],
+      "args": ["-y", "@tokenopt/cli", "mcp", "--mode", "lite"],
       "tools": [
         "tokenopt_compile_evidence",
         "tokenopt_search",
-        "tokenopt_read_file",
-        "tokenopt_project_facts"
+        "tokenopt_read_file"
       ]
     }
   }

@@ -158,16 +158,19 @@ test("Copilot setup writes repo guidance and merges user MCP config", () => {
   assert.equal((agentsInstructions.match(/tokenopt:mcp-instructions:start/g) ?? []).length, 1);
   assert.deepEqual(config.mcpServers.keep.tools, ["*"]);
   assert.equal(config.mcpServers.tokenopt.command, "node");
-  assert.deepEqual(config.mcpServers.tokenopt.args, [tokenoptCliPath.replace(/\\/g, "/"), "mcp"]);
+  assert.deepEqual(config.mcpServers.tokenopt.args, [tokenoptCliPath.replace(/\\/g, "/"), "mcp", "--mode", "lite"]);
   assert.ok(config.mcpServers.tokenopt.tools.includes("tokenopt_compile_evidence"));
-  assert.ok(config.mcpServers.tokenopt.tools.includes("tokenopt_run_command"));
+  assert.ok(!config.mcpServers.tokenopt.tools.includes("tokenopt_run_command"));
+  assert.ok(!config.mcpServers.tokenopt.tools.includes("tokenopt_project_facts"));
   assert.doesNotMatch(JSON.stringify(config.mcpServers.tokenopt), /\bnpm(?:\.cmd|\.ps1)?\b/i);
+  assert.ok(result.warnings.some((warning) => /lite mode/i.test(warning)));
   assert.ok(result.warnings.some((warning) => /hooks were not installed/i.test(warning)));
 });
 
 test("Copilot cloud MCP example excludes command execution by default", () => {
   const config = JSON.parse(buildCopilotCloudMcpConfig());
   assert.equal(config.mcpServers.tokenopt.command, "npx");
+  assert.deepEqual(config.mcpServers.tokenopt.args, ["-y", "@tokenopt/cli", "mcp", "--mode", "lite"]);
   assert.ok(config.mcpServers.tokenopt.tools.includes("tokenopt_compile_evidence"));
   assert.ok(!config.mcpServers.tokenopt.tools.includes("tokenopt_run_command"));
 });

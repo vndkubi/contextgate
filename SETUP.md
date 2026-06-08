@@ -58,7 +58,7 @@ Add this to `C:\Users\SonCao\.codex\config.toml`:
 ```toml
 [mcp_servers.tokenopt]
 command = "node"
-args = ["D:/Personal/Projects/tokenopt/dist/cli.js", "mcp"]
+args = ["D:/Personal/Projects/tokenopt/dist/cli.js", "mcp", "--mode", "lite"]
 ```
 
 For strict runs, disable Codex's built-in shell tool and force the agent through TokenOpt MCP:
@@ -71,18 +71,22 @@ npx.cmd -y @openai/codex@0.137.0 exec `
   --disable shell_tool `
   -C D:\Personal\Projects\tokenopt `
   -c "mcp_servers.tokenopt.command='node'" `
-  -c "mcp_servers.tokenopt.args=['D:/Personal/Projects/tokenopt/dist/cli.js','mcp']" `
+  -c "mcp_servers.tokenopt.args=['D:/Personal/Projects/tokenopt/dist/cli.js','mcp','--mode','lite']" `
   "Use tokenopt_compile_evidence first, then answer from the packet if answerable=true."
 ```
 
-TokenOpt MCP exposes:
+TokenOpt MCP defaults to lite mode so the MCP tool schemas do not cost more context than they save. Lite mode exposes:
 
 ```text
 tokenopt_compile_evidence
-tokenopt_run_command
 tokenopt_search
 tokenopt_read_file
-tokenopt_project_facts
+```
+
+Full mode adds command execution and standalone project facts:
+
+```text
+node D:\Personal\Projects\tokenopt\dist\cli.js mcp --mode full
 ```
 
 ## Agent Instructions

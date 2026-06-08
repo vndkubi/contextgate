@@ -102,6 +102,10 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
   }
 
   if (command === "mcp") {
+    const mode = parseMcpMode([subcommand, ...rest].filter((value): value is string => Boolean(value)));
+    if (mode) {
+      process.env.TOKENOPT_MCP_MODE = mode;
+    }
     await runMcpServer();
     return 0;
   }
@@ -228,7 +232,7 @@ function parseCopilotSetupOptions(args: string[]): {
 } {
   let scope: CopilotSetupScope = "both";
   let installAgents = true;
-  let includeRunCommand = true;
+  let includeRunCommand = false;
   let tokenoptCliPath: string | undefined;
 
   for (let index = 0; index < args.length; index += 1) {
@@ -263,10 +267,29 @@ function parseCopilotSetupOptions(args: string[]): {
       includeRunCommand = false;
       continue;
     }
+    if (arg === "--include-run-command") {
+      includeRunCommand = true;
+      continue;
+    }
     throw new Error(`Unknown Copilot setup option: ${arg}`);
   }
 
   return { scope, installAgents, tokenoptCliPath, includeRunCommand };
+}
+
+function parseMcpMode(args: string[]): "lite" | "full" | undefined {
+  if (args.length === 0) {
+    return undefined;
+  }
+  const modeIndex = args.indexOf("--mode");
+  if (modeIndex < 0) {
+    throw new Error("Usage: tokenopt mcp [--mode lite|full]");
+  }
+  const mode = args[modeIndex + 1];
+  if (mode !== "lite" && mode !== "full") {
+    throw new Error("--mode must be lite or full");
+  }
+  return mode;
 }
 
 function parseInstructionTarget(args: string[], fallback: InstructionTarget): InstructionTarget {
@@ -307,11 +330,11 @@ function helpText(): string {
 Commands:
   tokenopt init
   tokenopt install codex --scope user|repo
-  tokenopt setup copilot --scope user|repo|both [--no-agents] [--no-run-command]
-  tokenopt install copilot --scope user|repo|both [--no-agents] [--no-run-command]
+  tokenopt setup copilot --scope user|repo|both [--no-agents] [--include-run-command]
+  tokenopt install copilot --scope user|repo|both [--no-agents] [--include-run-command]
   tokenopt hook codex user-prompt-submit|pre-tool-use|post-tool-use|pre-compact
   tokenopt exec -- <command...>
-  tokenopt mcp
+  tokenopt mcp [--mode lite|full]
   tokenopt benchmark daily --repo <path> [--mode all]
   tokenopt benchmark codex-daily --repo <path> [--mode all]
   tokenopt benchmark suite --suite <json> --repo <path> [--mode baseline,mcp-first|router-best]
