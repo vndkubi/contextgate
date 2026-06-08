@@ -4,7 +4,7 @@ export type TokenOptHookEventName =
   | "post-tool-use"
   | "pre-compact";
 
-export type TokenOptSource = "codex";
+export type TokenOptSource = "codex" | "mcp";
 
 export type PolicyAction = "allow" | "deny" | "rewrite" | "context" | "compress";
 

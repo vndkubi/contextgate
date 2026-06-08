@@ -76,6 +76,8 @@ tokenopt_project_facts
 
 In this mode, shell commands, searches, and file reads can be routed through TokenOpt-controlled tools that deny broad reads/searches, return bounded file slices, compress command output, and preserve raw logs under the user cache.
 
+`rg` is only the fast search provider, not a hard requirement. MCP search and project inventory try providers in this order: `rg`, `git`, then a bounded built-in Node scanner. Tool output includes `searchProvider` so benchmark reports and agent transcripts show which provider was used instead of stopping at "rg not found".
+
 `tokenopt_compile_evidence` is the preferred first call for onboarding/build-handoff tasks. It returns an answerability packet with coverage, evidence IDs, missing items, allowed followups, disallowed followups, and a recommended next action. If the packet is `answerable=true` and recommends `answer_now`, TokenOpt stores short-lived repo state and gates redundant MCP searches/reads/commands with a compact "answer now" response.
 
 MCP tools also need agent instructions. Emit or install the reusable prompt snippet:

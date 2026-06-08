@@ -42,8 +42,11 @@ Scope meaning:
 
 - Node.js `>=20`
 - npm
-- `rg` / ripgrep on PATH
 - TokenOpt built locally:
+
+Optional:
+
+- `rg` / ripgrep on PATH for faster MCP search. If unavailable or blocked, TokenOpt falls back to `git`, then a bounded built-in Node scanner.
 
 ```powershell
 cd D:\Personal\Projects\tokenopt

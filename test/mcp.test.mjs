@@ -14,6 +14,7 @@ async function withTokenOptMcp(callback, options = {}) {
     cwd: options.cwd ?? process.cwd(),
     env: {
       ...process.env,
+      ...(options.env ?? {}),
       TOKENOPT_ARTIFACT_DIR: artifactDir
     }
   });
@@ -38,6 +39,40 @@ test("mcp exposes TokenOpt gated tools", async () => {
       "tokenopt_search"
     ]);
   });
+});
+
+test("mcp falls back to bounded node scanner when rg and git are unavailable", async () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "tokenopt-no-rg-repo-"));
+  fs.mkdirSync(path.join(repo, "src"), { recursive: true });
+  fs.writeFileSync(path.join(repo, "package.json"), JSON.stringify({ name: "no-rg-fixture" }, null, 2));
+  fs.writeFileSync(path.join(repo, "src", "index.ts"), "export const NeedleValue = 42;\n");
+
+  await withTokenOptMcp(
+    async (client) => {
+      const facts = await client.callTool({
+        name: "tokenopt_project_facts",
+        arguments: { cwd: repo }
+      });
+      assert.equal(facts.isError ?? false, false);
+      assert.match(facts.content[0].text, /searchProvider: node/);
+      assert.match(facts.content[0].text, /totalFiles:/);
+
+      const search = await client.callTool({
+        name: "tokenopt_search",
+        arguments: { pattern: "NeedleValue", cwd: repo }
+      });
+      assert.equal(search.isError ?? false, false);
+      assert.match(search.content[0].text, /searchProvider: node/);
+      assert.match(search.content[0].text, /src\/index\.ts:1:export const NeedleValue = 42;/);
+    },
+    {
+      cwd: repo,
+      env: {
+        PATH: "",
+        Path: ""
+      }
+    }
+  );
 });
 
 test("mcp replaces broad command with bounded inventory", async () => {

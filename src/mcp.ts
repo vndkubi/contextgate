@@ -8,9 +8,9 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import { loadConfig } from "./config.js";
 import { readActiveEvidenceTaskState, writeEvidenceTaskState } from "./evidence-state.js";
 import { executeWrappedShellCommand } from "./exec.js";
+import { compressText } from "./log-compressor.js";
 import { appendEvent, writeArtifact } from "./observability.js";
 import { evaluatePolicy } from "./policy-core.js";
-import { quoteShellArg } from "./shell.js";
 import type {
   EvidenceCoverageStatus,
   EvidenceItem,
@@ -22,6 +22,36 @@ import type {
   TokenOptConfig,
   TokenOptEvent
 } from "./types.js";
+
+type SearchProvider = "rg" | "git" | "node";
+
+interface RepoInventory {
+  totalFiles: number;
+  rawChars: number;
+  rawArtifact: string;
+  estimatedTokensAvoided: number;
+  searchProvider: SearchProvider;
+  diagnostics: string[];
+  topDirs: Array<[string, number]>;
+  topExtensions: Array<[string, number]>;
+  rootFiles: string[];
+  importantFiles: string[];
+}
+
+interface ProviderFileList {
+  provider: SearchProvider;
+  files: string[];
+  raw: string;
+  diagnostics: string[];
+}
+
+interface SearchProviderResult {
+  provider: SearchProvider;
+  exitCode: number;
+  durationMs: number;
+  rawOutput: string;
+  diagnostics: string[];
+}
 
 const SERVER_INSTRUCTIONS =
   "TokenOpt provides bounded repo tools and an evidence compiler. Start with tokenopt_compile_evidence for onboarding/build-handoff tasks. If it returns answerable=true, answer from the packet instead of replaying searches. Use tokenopt_search/read_file only for exact gaps and tokenopt_run_command for tests/builds so raw output is archived and model-visible output stays compact.";
@@ -114,7 +144,7 @@ export async function runMcpServer(): Promise<void> {
       {
         name: "tokenopt_search",
         title: "Search Repository Through TokenOpt",
-        description: "Run a targeted ripgrep search with TokenOpt output compression.",
+        description: "Run a targeted repository search with TokenOpt output compression. Uses rg when available, then git, then a bounded Node scanner.",
         inputSchema: {
           type: "object",
           properties: {
@@ -232,6 +262,7 @@ function compileEvidenceTool(args: Record<string, unknown>) {
       claim: "Repository shape was summarized from a raw file inventory stored outside model context.",
       facts: [
         `total_files=${inventory.totalFiles}`,
+        `search_provider=${inventory.searchProvider}`,
         `top_dirs=${inventory.topDirs.slice(0, 8).map(([name, count]) => `${name}:${count}`).join(",")}`,
         `top_extensions=${inventory.topExtensions.slice(0, 8).map(([name, count]) => `${name}:${count}`).join(",")}`,
         `raw_inventory_artifact=${inventory.rawArtifact}`
@@ -389,6 +420,7 @@ function maybeBuildCommandReplacement(
     "TokenOpt replaced a raw repo-wide file listing with bounded repo inventory.",
     `originalCommand: ${command}`,
     `policyReason: ${reason ?? "Repo-wide file listing would produce high-token raw output."}`,
+    `searchProvider: ${inventory.searchProvider}`,
     `totalFiles: ${inventory.totalFiles}`,
     `rawChars: ${inventory.rawChars}`,
     `estimatedTokensAvoided: ${inventory.estimatedTokensAvoided}`,
@@ -414,6 +446,7 @@ function maybeBuildCommandReplacement(
     structuredContent: {
       action: "replaced",
       originalCommand: command,
+      searchProvider: inventory.searchProvider,
       totalFiles: inventory.totalFiles,
       rawChars: inventory.rawChars,
       rawArtifact: inventory.rawArtifact,
@@ -431,21 +464,21 @@ function buildRepoInventory(cwd: string, config: TokenOptConfig, repoRoot: strin
   rawChars: number;
   rawArtifact: string;
   estimatedTokensAvoided: number;
+  searchProvider: SearchProvider;
+  diagnostics: string[];
   topDirs: Array<[string, number]>;
   topExtensions: Array<[string, number]>;
   rootFiles: string[];
   importantFiles: string[];
 } {
-  const result = spawnSync("rg", ["--files"], {
-    cwd,
-    encoding: "utf8",
-    maxBuffer: 64 * 1024 * 1024,
-    shell: process.platform === "win32"
-  });
-  const stdout = result.stdout || "";
-  const stderr = result.stderr || "";
-  const raw = stdout || stderr || `(rg --files exited with ${result.status ?? "unknown"} and no output)`;
-  const files = stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const listing = collectRepoFiles(cwd, repoRoot);
+  const files = listing.files;
+  const raw = [
+    `searchProvider=${listing.provider}`,
+    ...listing.diagnostics.map((diagnostic) => `diagnostic=${diagnostic}`),
+    "",
+    listing.raw
+  ].join("\n");
   const rawArtifact = writeArtifact(config, repoRoot, "repo-files.txt", raw);
   const topDirs = topCounts(files.map(firstPathSegment), 12);
   const topExtensions = topCounts(files.map(fileExtension), 12);
@@ -458,11 +491,144 @@ function buildRepoInventory(cwd: string, config: TokenOptConfig, repoRoot: strin
     rawChars: raw.length,
     rawArtifact,
     estimatedTokensAvoided: Math.ceil(Math.max(0, raw.length - summaryChars) / 4),
+    searchProvider: listing.provider,
+    diagnostics: listing.diagnostics,
     topDirs,
     topExtensions,
     rootFiles,
     importantFiles
   };
+}
+
+function collectRepoFiles(cwd: string, repoRoot: string): ProviderFileList {
+  const diagnostics: string[] = [];
+  const rg = runFileListCommand("rg", ["--files"], cwd);
+  if (rg.files.length > 0) {
+    return { provider: "rg", files: rg.files, raw: rg.stdout, diagnostics };
+  }
+  diagnostics.push(`rg unavailable or empty: ${formatCommandDiagnostic(rg)}`);
+
+  const git = runFileListCommand("git", ["ls-files"], repoRoot);
+  if (git.files.length > 0) {
+    return { provider: "git", files: git.files, raw: git.stdout, diagnostics };
+  }
+  diagnostics.push(`git ls-files unavailable or empty: ${formatCommandDiagnostic(git)}`);
+
+  const node = collectNodeRepoFiles(repoRoot);
+  diagnostics.push(`node bounded scanner used: scanned=${node.files.length}${node.truncated ? " truncated=true" : ""}`);
+  return {
+    provider: "node",
+    files: node.files,
+    raw: node.files.join("\n"),
+    diagnostics
+  };
+}
+
+function runFileListCommand(command: string, args: string[], cwd: string): {
+  status: number | null;
+  stdout: string;
+  stderr: string;
+  error?: string;
+  files: string[];
+} {
+  const result = spawnSync(command, args, {
+    cwd,
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+    shell: process.platform === "win32"
+  });
+  const stdout = result.stdout || "";
+  const stderr = result.stderr || "";
+  return {
+    status: result.status,
+    stdout,
+    stderr,
+    error: result.error?.message,
+    files: stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+  };
+}
+
+function collectNodeRepoFiles(root: string, options: { maxFiles?: number; maxDepth?: number } = {}): { files: string[]; truncated: boolean } {
+  const maxFiles = options.maxFiles ?? 100_000;
+  const maxDepth = options.maxDepth ?? 30;
+  const files: string[] = [];
+  const stack: Array<{ absolute: string; relative: string; depth: number }> = [{ absolute: root, relative: "", depth: 0 }];
+  let truncated = false;
+
+  while (stack.length > 0) {
+    if (files.length >= maxFiles) {
+      truncated = true;
+      break;
+    }
+    const current = stack.pop()!;
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(current.absolute, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+
+    entries.sort((a, b) => b.name.localeCompare(a.name));
+    for (const entry of entries) {
+      const relative = current.relative ? path.join(current.relative, entry.name) : entry.name;
+      const normalized = relative.replace(/\\/g, "/");
+      if (entry.isDirectory()) {
+        if (current.depth >= maxDepth || shouldSkipInventoryDir(entry.name, normalized)) {
+          continue;
+        }
+        stack.push({ absolute: path.join(current.absolute, entry.name), relative, depth: current.depth + 1 });
+        continue;
+      }
+      if (!entry.isFile() || shouldSkipInventoryFile(entry.name, normalized)) {
+        continue;
+      }
+      files.push(normalized);
+      if (files.length >= maxFiles) {
+        truncated = true;
+        break;
+      }
+    }
+  }
+
+  return { files: files.sort(), truncated };
+}
+
+function shouldSkipInventoryDir(name: string, normalizedPath: string): boolean {
+  const lower = name.toLowerCase();
+  if ([
+    ".git",
+    "node_modules",
+    "dist",
+    "build",
+    "coverage",
+    ".next",
+    ".nuxt",
+    ".turbo",
+    ".cache",
+    "target",
+    "__pycache__",
+    ".venv",
+    "venv"
+  ].includes(lower)) {
+    return true;
+  }
+  return /(^|\/)(dist|build|coverage|node_modules)(\/|$)/i.test(normalizedPath);
+}
+
+function shouldSkipInventoryFile(name: string, normalizedPath: string): boolean {
+  const lower = name.toLowerCase();
+  if (lower.endsWith(".map") || lower.endsWith(".min.js") || lower.endsWith(".lock")) {
+    return true;
+  }
+  return /(^|\/)(package-lock\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lockb|cargo\.lock|uv\.lock)$/i.test(normalizedPath);
+}
+
+function formatCommandDiagnostic(result: { status: number | null; stderr: string; error?: string }): string {
+  return [
+    `status=${result.status ?? "null"}`,
+    result.error ? `error=${result.error}` : undefined,
+    result.stderr.trim() ? `stderr=${result.stderr.trim().slice(0, 180)}` : undefined
+  ].filter(Boolean).join(" ");
 }
 
 function firstPathSegment(filePath: string): string {
@@ -515,22 +681,195 @@ async function searchTool(args: Record<string, unknown>) {
     return textResult(targetPath.error, true);
   }
 
-  const command = [
-    "rg",
-    "--line-number",
-    "--no-heading",
-    "--color",
-    "never",
-    quoteShellArg(pattern),
-    quoteShellArg(path.relative(cwd, targetPath.path) || ".")
-  ].join(" ");
-  const result = await executeWrappedShellCommand(command, loaded.config, loaded.repoRoot, cwd);
-  return textResult(result.summary, false, {
+  const result = runTargetedSearch(pattern, targetPath.path, loaded.repoRoot);
+  const rawArtifact = writeArtifact(loaded.config, loaded.repoRoot, "search-output.log", result.rawOutput);
+  const compressed = compressText(
+    result.rawOutput || `(search provider ${result.provider} exited with ${result.exitCode} and no output)`,
+    loaded.config.policy.maxCommandOutputChars
+  );
+  const summary = [
+    "TokenOpt search summary",
+    `searchProvider: ${result.provider}`,
+    `pattern: ${pattern}`,
+    `path: ${path.relative(loaded.repoRoot, targetPath.path) || "."}`,
+    `exitCode: ${result.exitCode}`,
+    `durationMs: ${result.durationMs}`,
+    `rawArtifact: ${rawArtifact}`,
+    ...result.diagnostics.map((diagnostic) => `diagnostic: ${diagnostic}`),
+    "",
+    compressed.text
+  ].join("\n");
+
+  appendEvent(loaded.config, {
+    timestamp: new Date().toISOString(),
+    source: "mcp",
+    eventName: "pre-tool-use",
+    repoRoot: loaded.repoRoot,
+    action: "exec",
+    command: `tokenopt_search provider=${result.provider} pattern=${pattern}`,
+    artifactPath: rawArtifact,
+    estimatedTokensSaved: compressed.estimatedTokensSaved,
+    metadata: {
+      searchProvider: result.provider,
+      exitCode: result.exitCode,
+      durationMs: result.durationMs
+    }
+  });
+
+  return textResult(summary, false, {
+    searchProvider: result.provider,
     exitCode: result.exitCode,
     durationMs: result.durationMs,
-    rawArtifact: result.rawArtifact,
-    estimatedTokensSaved: result.estimatedTokensSaved
+    rawArtifact,
+    estimatedTokensSaved: compressed.estimatedTokensSaved
   });
+}
+
+function runTargetedSearch(pattern: string, targetPath: string, repoRoot: string): SearchProviderResult {
+  const started = Date.now();
+  const diagnostics: string[] = [];
+  const relativeToRepo = path.relative(repoRoot, targetPath).replace(/\\/g, "/") || ".";
+
+  const rg = spawnSync("rg", ["--line-number", "--no-heading", "--color", "never", pattern, targetPath], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    maxBuffer: 32 * 1024 * 1024,
+    shell: process.platform === "win32"
+  });
+  if ((rg.status === 0 || rg.status === 1) && !commandLooksUnavailable(rg.stderr, rg.error?.message)) {
+    return {
+      provider: "rg",
+      exitCode: rg.status ?? 1,
+      durationMs: Date.now() - started,
+      rawOutput: [rg.stdout, rg.stderr].filter(Boolean).join("\n"),
+      diagnostics
+    };
+  }
+  diagnostics.push(`rg unavailable: ${formatCommandDiagnostic({ status: rg.status, stderr: rg.stderr || "", error: rg.error?.message })}`);
+
+  const gitPath = relativeToRepo === "." ? "." : relativeToRepo;
+  const git = spawnSync("git", ["grep", "-n", "--no-color", "-I", "--", pattern, gitPath], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    maxBuffer: 32 * 1024 * 1024,
+    shell: process.platform === "win32"
+  });
+  if ((git.status === 0 || git.status === 1) && !commandLooksUnavailable(git.stderr, git.error?.message)) {
+    return {
+      provider: "git",
+      exitCode: git.status ?? 1,
+      durationMs: Date.now() - started,
+      rawOutput: [git.stdout, git.stderr].filter(Boolean).join("\n"),
+      diagnostics
+    };
+  }
+  diagnostics.push(`git grep unavailable: ${formatCommandDiagnostic({ status: git.status, stderr: git.stderr || "", error: git.error?.message })}`);
+
+  const node = runNodeSearch(pattern, targetPath, repoRoot);
+  return {
+    provider: "node",
+    exitCode: node.matches > 0 ? 0 : 1,
+    durationMs: Date.now() - started,
+    rawOutput: node.output,
+    diagnostics: [
+      ...diagnostics,
+      `node bounded scanner used: filesScanned=${node.filesScanned} matches=${node.matches}${node.truncated ? " truncated=true" : ""}`
+    ]
+  };
+}
+
+function commandLooksUnavailable(stderr = "", error = ""): boolean {
+  return /not recognized|not found|is not installed|No such file or directory|ENOENT/i.test(`${stderr}\n${error}`);
+}
+
+function runNodeSearch(pattern: string, targetPath: string, repoRoot: string): {
+  output: string;
+  filesScanned: number;
+  matches: number;
+  truncated: boolean;
+} {
+  const files = collectSearchFiles(targetPath, repoRoot);
+  const matcher = buildTextMatcher(pattern);
+  const lines: string[] = [];
+  let filesScanned = 0;
+  let matches = 0;
+  let truncated = false;
+  const maxMatches = 160;
+  const maxFileBytes = 256 * 1024;
+
+  for (const file of files) {
+    if (matches >= maxMatches) {
+      truncated = true;
+      break;
+    }
+    let stat: fs.Stats;
+    try {
+      stat = fs.statSync(file);
+    } catch {
+      continue;
+    }
+    if (!stat.isFile() || stat.size > maxFileBytes || isProbablyBinaryPath(file)) {
+      continue;
+    }
+    filesScanned += 1;
+    let text: string;
+    try {
+      text = fs.readFileSync(file, "utf8");
+    } catch {
+      continue;
+    }
+    const relative = path.relative(repoRoot, file).replace(/\\/g, "/");
+    const fileLines = text.replace(/\r\n/g, "\n").split("\n");
+    for (let index = 0; index < fileLines.length; index += 1) {
+      if (!matcher(fileLines[index]!)) {
+        continue;
+      }
+      lines.push(`${relative}:${index + 1}:${fileLines[index]}`);
+      matches += 1;
+      if (matches >= maxMatches) {
+        truncated = true;
+        break;
+      }
+    }
+  }
+
+  return {
+    output: lines.length > 0 ? lines.join("\n") : "No matches.",
+    filesScanned,
+    matches,
+    truncated
+  };
+}
+
+function collectSearchFiles(targetPath: string, repoRoot: string): string[] {
+  let stat: fs.Stats;
+  try {
+    stat = fs.statSync(targetPath);
+  } catch {
+    return [];
+  }
+  if (stat.isFile()) {
+    return [targetPath];
+  }
+  if (!stat.isDirectory()) {
+    return [];
+  }
+  const relativeFiles = collectNodeRepoFiles(targetPath, { maxFiles: 20_000, maxDepth: 20 }).files;
+  return relativeFiles.map((file) => path.join(targetPath, file));
+}
+
+function buildTextMatcher(pattern: string): (line: string) => boolean {
+  try {
+    const regex = new RegExp(pattern, "i");
+    return (line: string) => regex.test(line);
+  } catch {
+    const lowered = pattern.toLowerCase();
+    return (line: string) => line.toLowerCase().includes(lowered);
+  }
+}
+
+function isProbablyBinaryPath(filePath: string): boolean {
+  return /\.(png|jpe?g|gif|webp|ico|pdf|zip|gz|tar|jar|war|class|wasm|exe|dll|so|dylib|bin|lock)$/i.test(filePath);
 }
 
 function readFileTool(args: Record<string, unknown>) {
@@ -596,6 +935,7 @@ function projectFactsTool(args: Record<string, unknown>) {
   const text = [
     "TokenOpt project facts",
     `repoRoot: ${loaded.repoRoot}`,
+    `searchProvider: ${inventory.searchProvider}`,
     `totalFiles: ${inventory.totalFiles}`,
     `rawInventoryChars: ${inventory.rawChars}`,
     `rawInventoryArtifact: ${inventory.rawArtifact}`,
@@ -612,6 +952,7 @@ function projectFactsTool(args: Record<string, unknown>) {
 
   return textResult(text, false, {
     repoRoot: loaded.repoRoot,
+    searchProvider: inventory.searchProvider,
     totalFiles: inventory.totalFiles,
     rawInventoryArtifact: inventory.rawArtifact,
     facts

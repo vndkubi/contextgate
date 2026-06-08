@@ -13,8 +13,11 @@ For GitHub Copilot setup, see [COPILOT_SETUP.md](COPILOT_SETUP.md).
 
 - Node.js `>=20`
 - npm
-- `rg` / ripgrep available on PATH
 - For agent-level benchmarks: `npx @openai/codex@0.137.0`
+
+Optional:
+
+- `rg` / ripgrep on PATH for faster MCP search. If unavailable or blocked, TokenOpt falls back to `git`, then a bounded built-in Node scanner.
 
 On Windows PowerShell, prefer `.cmd` shims if `npm.ps1` is blocked:
 
