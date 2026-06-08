@@ -60,7 +60,7 @@ interface RepositoryOverview {
 }
 
 const SERVER_INSTRUCTIONS =
-  "TokenOpt provides bounded repo tools and an evidence compiler. Start with tokenopt_compile_evidence for repo understanding, business/domain deep dives, onboarding/build handoffs, investigations, implementation planning, and test planning. If it returns answerable=true, answer from the packet instead of replaying shell/search/read calls. Use tokenopt_search/read_file only for exact gaps and tokenopt_run_command for tests/builds so raw output is archived and model-visible output stays compact.";
+  "TokenOpt provides bounded repo tools and an evidence compiler. Start with tokenopt_compile_evidence for repo understanding, existing-flow deep dives/diagrams, business/domain deep dives, onboarding/build handoffs, investigations, implementation planning, and test planning. If it returns answerable=true, answer from the packet instead of replaying shell/search/read calls. If answerable=false, use only the packet's allowed TokenOpt followups. Use tokenopt_search/read_file only for exact gaps and tokenopt_run_command for tests/builds so raw output is archived and model-visible output stays compact.";
 
 export async function runMcpServer(): Promise<void> {
   const server = new Server(
@@ -376,7 +376,7 @@ function compileEvidenceTool(args: Record<string, unknown>) {
     expires_at: expiresAt.toISOString()
   };
 
-  const statePath = answerable ? writeEvidenceTaskState(loaded.config, loaded.repoRoot, packet) : undefined;
+  const statePath = writeEvidenceTaskState(loaded.config, loaded.repoRoot, packet);
   appendEvent(loaded.config, {
     timestamp: now.toISOString(),
     source: "mcp",
@@ -670,7 +670,7 @@ function isImportantFile(filePath: string): boolean {
   if (/^(readme|package|pom|build\.gradle|settings\.gradle|gradle\.properties|tsconfig|eslint|vite|webpack|cargo|go\.mod|pyproject|requirements)/i.test(base)) {
     return true;
   }
-  return /(^|\/)(src|server|client|app|lib|core|modules|docs)\//i.test(normalized) && /\.(ts|tsx|js|jsx|java|py|go|rs|md|asciidoc)$/i.test(base);
+  return /(^|\/)(src|server|client|app|lib|core|modules|docs|test|tests|qa)\//i.test(normalized) && /\.(ts|tsx|js|jsx|java|py|go|rs|md|asciidoc)$/i.test(base);
 }
 
 async function searchTool(args: Record<string, unknown>) {
@@ -1026,6 +1026,18 @@ interface BusinessProfile {
   hasDeepDiveSignal: boolean;
 }
 
+interface FlowProfile {
+  target: string;
+  searchTerms: string[];
+  candidateEntrypoints: string[];
+  candidateServices: string[];
+  candidateDataFiles: string[];
+  candidateTests: string[];
+  candidateDocs: string[];
+  businessContext: string[];
+  hasNamedTarget: boolean;
+}
+
 function compileTaskSpecificEvidence(
   taskType: EvidenceTaskType,
   task: string,
@@ -1039,7 +1051,199 @@ function compileTaskSpecificEvidence(
   if (taskType === "research_business") {
     return compileBusinessResearchEvidence(task, repoRoot, firstEvidenceIndex, context);
   }
+  if (taskType === "api_flow") {
+    return compileFlowEvidence(task, firstEvidenceIndex, context);
+  }
   return undefined;
+}
+
+function compileFlowEvidence(task: string, firstEvidenceIndex: number, context: EvidenceContext): TaskSpecificEvidence {
+  const profile = extractFlowProfile(task, context);
+  const hasCandidateCode = profile.candidateEntrypoints.length > 0 || profile.candidateServices.length > 0;
+
+  return {
+    answerable: false,
+    confidence: hasCandidateCode ? 0.66 : 0.52,
+    coverage: {
+      flow_target: profile.hasNamedTarget ? "covered" : "partial",
+      candidate_entrypoints: profile.candidateEntrypoints.length > 0 ? "partial" : "missing",
+      candidate_services: profile.candidateServices.length > 0 ? "partial" : "missing",
+      candidate_tests: profile.candidateTests.length > 0 ? "partial" : "missing",
+      diagram_contract: "covered",
+      business_context: profile.businessContext.length > 0 ? "partial" : "missing"
+    },
+    evidence: [
+      {
+        id: `E${firstEvidenceIndex}`,
+        claim: "Flow deep-dive packet identified the target flow and bounded candidate evidence, but exact code-path proof still requires targeted followups.",
+        files: [
+          ...profile.candidateDocs,
+          ...profile.candidateEntrypoints,
+          ...profile.candidateServices,
+          ...profile.candidateDataFiles,
+          ...profile.candidateTests
+        ].slice(0, 28),
+        facts: [
+          `flow_target=${profile.target}`,
+          `search_terms=${profile.searchTerms.join(",") || "none_detected"}`,
+          `candidate_entrypoints=${profile.candidateEntrypoints.join(",") || "none_detected"}`,
+          `candidate_services=${profile.candidateServices.join(",") || "none_detected"}`,
+          `candidate_data_or_model_files=${profile.candidateDataFiles.join(",") || "none_detected"}`,
+          `candidate_tests=${profile.candidateTests.join(",") || "none_detected"}`,
+          `candidate_docs=${profile.candidateDocs.join(",") || "none_detected"}`,
+          `business_context=${profile.businessContext.join(" | ") || "none_detected"}`
+        ],
+        tokens_est: 360
+      },
+      {
+        id: `E${firstEvidenceIndex + 1}`,
+        claim: "Answer contract for existing-flow understanding and diagramming is available.",
+        facts: [
+          "final_answer_sections=Business purpose of the flow; Actors and triggers; Preconditions; Step-by-step sequence; Data/state changes; External dependencies; Failure/edge cases; Files to inspect; Mermaid sequenceDiagram or flowchart",
+          "diagram_nodes=actor/user -> API/UI entrypoint -> validation/auth -> application service -> domain/model -> repository/storage/external service -> response/event",
+          "quality_bar=each diagram edge should cite evidence file/line or clearly mark inferred/unknown",
+          "fallback_policy=use tokenopt_search/read_file followups only; do_not_use_raw_shell_grep"
+        ],
+        tokens_est: 150
+      }
+    ],
+    missing: [
+      "Exact entrypoint, call chain, state transitions, and failure paths are not proven from inventory alone.",
+      "Use the allowed TokenOpt followups to read bounded slices around matched entrypoints/services/tests before drawing the final flow."
+    ],
+    allowedFollowups: [
+      {
+        tool: "tokenopt_search",
+        reason: "Find exact references to the requested flow name, route, command, service, or domain term.",
+        args: { pattern: profile.searchTerms[0] ?? "<flow-name-or-route>", path: "." },
+        max_output_tokens: 700
+      },
+      {
+        tool: "tokenopt_read_file",
+        reason: "Read a bounded slice around the most likely entrypoint or service match.",
+        args: { path: profile.candidateEntrypoints[0] ?? profile.candidateServices[0] ?? "<matched-file>", startLine: 1, maxLines: 180 },
+        max_output_tokens: 1100
+      },
+      {
+        tool: "tokenopt_search",
+        reason: "Find tests or examples that encode expected business behavior for the flow.",
+        args: { pattern: profile.searchTerms[0] ?? "<flow-name-or-domain-term>", path: profile.candidateTests.length > 0 ? path.dirname(profile.candidateTests[0]!) : "." },
+        max_output_tokens: 700
+      }
+    ]
+  };
+}
+
+function extractFlowProfile(task: string, context: EvidenceContext): FlowProfile {
+  const target = extractFlowTarget(task);
+  const searchTerms = uniqueStrings([
+    ...splitFlowTerms(target),
+    ...extractQuotedTerms(task),
+    ...extractRouteTerms(task)
+  ]).slice(0, 10);
+  const importantFiles = context.inventory.importantFiles.map((file) => file.replace(/\\/g, "/"));
+  const candidateDocs = importantFiles
+    .filter((file) => /(^|\/)(docs|doc|README|readme)/i.test(file) && pathMatchesTerms(file, searchTerms))
+    .slice(0, 8);
+  const sourceFiles = importantFiles.filter((file) => /\.(ts|tsx|js|jsx|java|py|go|rs|kt|scala|cs)$/i.test(file));
+  const candidateEntrypoints = sourceFiles
+    .filter((file) => pathMatchesTerms(file, searchTerms) && /(?:controller|resource|route|routes|handler|endpoint|web|api|command|resolver|page|view)/i.test(file))
+    .slice(0, 10);
+  const candidateServices = sourceFiles
+    .filter((file) => pathMatchesTerms(file, searchTerms) && /(?:service|manager|processor|workflow|flow|usecase|facade|application|domain)/i.test(file))
+    .slice(0, 10);
+  const candidateDataFiles = sourceFiles
+    .filter((file) => pathMatchesTerms(file, searchTerms) && /(?:model|entity|schema|repository|dao|store|state|event|message)/i.test(file))
+    .slice(0, 8);
+  const candidateTests = importantFiles
+    .filter((file) => pathMatchesTerms(file, searchTerms) && /(^|\/)(test|tests|src\/test|qa|__tests__)(\/|$)|\.(test|spec)\.(ts|tsx|js|jsx)$/i.test(file))
+    .slice(0, 10);
+  const businessContext = uniqueStrings([
+    context.overview ? `${context.overview.file}: ${context.overview.summary}` : "",
+    ...context.facts.filter((fact) => /(?:package_name|artifact_id|root_project|build_tool)/i.test(fact)).slice(0, 6),
+    ...context.structureFacts.slice(0, 4)
+  ].filter(Boolean).map(cleanFactValue)).slice(0, 10);
+
+  return {
+    target,
+    searchTerms,
+    candidateEntrypoints,
+    candidateServices,
+    candidateDataFiles,
+    candidateTests,
+    candidateDocs,
+    businessContext,
+    hasNamedTarget: target !== "flow_target_not_explicit"
+  };
+}
+
+function extractFlowTarget(task: string): string {
+  const quoted = extractQuotedTerms(task)[0];
+  if (quoted) {
+    return cleanFactValue(quoted);
+  }
+  const patterns = [
+    /\b(?:investigate|understand|study|deep\s*dive|explain|map|draw|trace)\s+(?:the\s+)?(.+?\bflow)\b/i,
+    /\bflow\s+(?:of|for|called|named)\s+([A-Za-z0-9_./:-][A-Za-z0-9_ ./:-]{2,80})/i,
+    /\b([A-Za-z0-9_./:-][A-Za-z0-9_ ./:-]{2,80})\s+flow\b/i
+  ];
+  for (const pattern of patterns) {
+    const match = task.match(pattern)?.[1];
+    if (match) {
+      return cleanFactValue(match.replace(/\b(?:so|to|and|for me|please|giúp|ve|vẽ|diagram|mermaid)\b.*$/i, ""));
+    }
+  }
+  const route = extractRouteTerms(task)[0];
+  if (route) {
+    return route;
+  }
+  return "flow_target_not_explicit";
+}
+
+function extractQuotedTerms(text: string): string[] {
+  const terms: string[] = [];
+  for (const match of text.matchAll(/["'`](.{2,120}?)["'`]/g)) {
+    terms.push(match[1]!.trim());
+  }
+  return terms;
+}
+
+function extractRouteTerms(text: string): string[] {
+  const terms: string[] = [];
+  for (const match of text.matchAll(/\b(?:GET|POST|PUT|PATCH|DELETE)\s+([/A-Za-z0-9_{}/:.-]+)/gi)) {
+    terms.push(match[1]!.trim());
+  }
+  for (const match of text.matchAll(/\/[A-Za-z0-9_{}/:.-]{2,}/g)) {
+    terms.push(match[0].trim());
+  }
+  return uniqueStrings(terms).slice(0, 8);
+}
+
+function splitFlowTerms(target: string): string[] {
+  if (target === "flow_target_not_explicit") {
+    return [];
+  }
+  const normalized = target.replace(/([a-z0-9])([A-Z])/g, "$1 $2");
+  return uniqueStrings([
+    target,
+    ...normalized.split(/[^A-Za-z0-9_/-]+/).filter((term) => term.length >= 3),
+    ...target.split(/[\/_.:-]+/).filter((term) => term.length >= 3)
+  ]).slice(0, 10);
+}
+
+function pathMatchesTerms(filePath: string, terms: string[]): boolean {
+  if (terms.length === 0) {
+    return false;
+  }
+  const normalizedPath = filePath.toLowerCase();
+  return terms.some((term) => {
+    const normalizedTerm = term.toLowerCase().replace(/[^a-z0-9]+/g, "");
+    if (normalizedTerm.length < 3) {
+      return false;
+    }
+    return normalizedPath.replace(/[^a-z0-9]+/g, "").includes(normalizedTerm) ||
+      term.toLowerCase().split(/[^a-z0-9]+/).some((part) => part.length >= 4 && normalizedPath.includes(part));
+  });
 }
 
 function compileBusinessResearchEvidence(
@@ -1521,6 +1725,12 @@ function inferTaskType(task: string): EvidenceTaskType {
   if (/\b(implement|change|add feature|modify|patch|code change)\b/i.test(task)) {
     return "implement";
   }
+  if (/\b(startup|boot|initialize|server start)\b/i.test(task)) {
+    return "startup_flow";
+  }
+  if (/\b(flow|sequence\s*diagram|flowchart|diagram|mermaid|end-to-end|e2e|journey)\b/i.test(task) || /\bvẽ\b/i.test(task)) {
+    return "api_flow";
+  }
   if (/\b(business|product|domain|customer|research|purpose|what does this repo do)\b/i.test(task)) {
     return "research_business";
   }
@@ -1541,9 +1751,6 @@ function inferTaskType(task: string): EvidenceTaskType {
   }
   if (/\b(diff|review|pull request|pr)\b/i.test(task)) {
     return "review_diff";
-  }
-  if (/\b(startup|boot|initialize|server start)\b/i.test(task)) {
-    return "startup_flow";
   }
   return "unknown";
 }
@@ -1577,6 +1784,14 @@ function buildCoverage(
       coverage.repository_purpose = hasOverview ? "covered" : "partial";
       coverage.project_identity = hasBuildFacts || hasOverview ? "covered" : "missing";
       coverage.major_areas = hasInventory ? "covered" : "missing";
+      break;
+    case "api_flow":
+      coverage.flow_target = "partial";
+      coverage.entrypoint = "missing";
+      coverage.call_chain = "missing";
+      coverage.business_state_changes = "missing";
+      coverage.diagram_contract = hasInventory ? "covered" : "partial";
+      coverage.tests_or_examples = hasTestAreas ? "partial" : "missing";
       break;
     case "implement":
       coverage.implementation_scope = hasSourceAreas ? "covered" : "partial";

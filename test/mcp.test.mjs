@@ -159,6 +159,61 @@ test("mcp compiles business deep-dive evidence and gates grep fallback", async (
   );
 });
 
+test("mcp compiles existing flow packet for diagramming and routes fallback to TokenOpt followups", async () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "tokenopt-flow-repo-"));
+  fs.mkdirSync(path.join(repo, "src", "checkout"), { recursive: true });
+  fs.mkdirSync(path.join(repo, "test", "checkout"), { recursive: true });
+  fs.writeFileSync(
+    path.join(repo, "package.json"),
+    JSON.stringify(
+      {
+        name: "checkout-flow-fixture",
+        version: "1.0.0",
+        scripts: { test: "vitest run" }
+      },
+      null,
+      2
+    )
+  );
+  fs.writeFileSync(
+    path.join(repo, "README.md"),
+    "Checkout Flow Fixture\n\nThis repository models a checkout flow for carts, payment authorization, and order confirmation.\n"
+  );
+  fs.writeFileSync(path.join(repo, "src", "checkout", "CheckoutController.ts"), "export class CheckoutController {}\n");
+  fs.writeFileSync(path.join(repo, "src", "checkout", "CheckoutService.ts"), "export class CheckoutService {}\n");
+  fs.writeFileSync(path.join(repo, "test", "checkout", "CheckoutFlow.test.ts"), "test('checkout flow', () => {});\n");
+
+  await withTokenOptMcp(
+    async (client) => {
+      const packet = await client.callTool({
+        name: "tokenopt_compile_evidence",
+        arguments: {
+          task: "Understand checkout flow end-to-end so I can draw Mermaid sequence diagram and explain business",
+          cwd: repo,
+          quality_rubric: ["actors and trigger", "step-by-step call chain", "business state changes", "mermaid diagram"]
+        }
+      });
+      assert.equal(packet.isError ?? false, false);
+      assert.match(packet.content[0].text, /task_type: api_flow/);
+      assert.match(packet.content[0].text, /answerable: false/);
+      assert.match(packet.content[0].text, /flow_target=checkout flow/);
+      assert.match(packet.content[0].text, /candidate_entrypoints=.*CheckoutController\.ts/);
+      assert.match(packet.content[0].text, /candidate_services=.*CheckoutService\.ts/);
+      assert.match(packet.content[0].text, /candidate_tests=.*CheckoutFlow\.test\.ts/);
+      assert.match(packet.content[0].text, /Mermaid sequenceDiagram or flowchart/);
+      assert.match(packet.content[0].text, /tokenopt_search: Find exact references/);
+
+      const search = await client.callTool({
+        name: "tokenopt_search",
+        arguments: { pattern: "CheckoutService", cwd: repo }
+      });
+      assert.equal(search.isError ?? false, false);
+      assert.match(search.content[0].text, /TokenOpt search summary/);
+    },
+    { cwd: repo }
+  );
+});
+
 test("mcp compiles answerable evidence and gates redundant exploration", async () => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "tokenopt-evidence-repo-"));
   fs.mkdirSync(path.join(repo, "src"), { recursive: true });

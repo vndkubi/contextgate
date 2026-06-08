@@ -183,3 +183,55 @@ test("pre-tool-use denies shell grep after answerable evidence packet", () => {
   assert.match(decision.reason, /answerability gate blocked shell search/);
   assert.match(decision.reason, /packet-123/);
 });
+
+test("pre-tool-use denies shell search after non-answerable packet with TokenOpt followups", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "tokenopt-policy-flow-"));
+  const artifactDir = fs.mkdtempSync(path.join(os.tmpdir(), "tokenopt-policy-flow-artifacts-"));
+  fs.writeFileSync(path.join(repo, "package.json"), JSON.stringify({ name: "policy-flow-fixture" }));
+  const loaded = loadConfig({ cwd: repo, env: { TOKENOPT_ARTIFACT_DIR: artifactDir } });
+  writeEvidenceTaskState(loaded.config, loaded.repoRoot, {
+    packet_id: "packet-flow",
+    task: "understand checkout flow and draw mermaid diagram",
+    task_type: "api_flow",
+    repo_root: loaded.repoRoot,
+    answerable: false,
+    confidence: 0.62,
+    coverage: {},
+    evidence: [],
+    missing: ["Need exact entrypoint."],
+    allowed_followups: [
+      {
+        tool: "tokenopt_search",
+        reason: "Find exact flow references.",
+        args: { pattern: "checkout", path: "." }
+      }
+    ],
+    disallowed_followups: ["raw_shell_search"],
+    recommended_next_action: "expand_exact",
+    max_additional_calls: 3,
+    token_budget: {
+      budget_tokens: 1600,
+      evidence_tokens_est: 200,
+      response_tokens_est: 250
+    },
+    created_at: new Date().toISOString(),
+    expires_at: new Date(Date.now() + 60_000).toISOString()
+  });
+
+  const decision = evaluatePolicy(
+    {
+      source: "codex",
+      eventName: "pre-tool-use",
+      cwd: repo,
+      toolName: "Bash",
+      toolInput: { command: "rg checkout src" },
+      raw: {}
+    },
+    loaded.config,
+    { repoRoot: loaded.repoRoot }
+  );
+
+  assert.equal(decision.action, "deny");
+  assert.match(decision.reason, /Use the packet's allowed_followups/);
+  assert.match(decision.reason, /packet-flow/);
+});

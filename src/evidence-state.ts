@@ -26,6 +26,24 @@ export function readActiveEvidenceTaskState(
   repoRoot: string,
   now = new Date()
 ): EvidenceTaskState | undefined {
+  const state = readEvidenceTaskState(config, repoRoot);
+  if (!state) {
+    return undefined;
+  }
+
+  if (!state.packet.answerable || state.packet.recommended_next_action !== "answer_now") {
+    return undefined;
+  }
+  if (Date.parse(state.packet.expires_at) <= now.getTime()) {
+    return undefined;
+  }
+  return state;
+}
+
+export function readEvidenceTaskState(
+  config: TokenOptConfig,
+  repoRoot: string
+): EvidenceTaskState | undefined {
   const filePath = path.join(getRepoCacheDir(config, repoRoot), STATE_FILE);
   if (!fs.existsSync(filePath)) {
     return undefined;
@@ -38,11 +56,5 @@ export function readActiveEvidenceTaskState(
     return undefined;
   }
 
-  if (!state.packet.answerable || state.packet.recommended_next_action !== "answer_now") {
-    return undefined;
-  }
-  if (Date.parse(state.packet.expires_at) <= now.getTime()) {
-    return undefined;
-  }
   return state;
 }

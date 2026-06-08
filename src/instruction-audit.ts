@@ -39,7 +39,7 @@ export function emitTokenOptInstructions(target: InstructionTarget = "generic"):
   return [
     heading,
     "",
-    "When the TokenOpt MCP server is available, use it as the first context acquisition path for repository understanding, business/product/domain deep dives, daily handoff, investigation, implementation planning, and unit-test planning tasks.",
+    "When the TokenOpt MCP server is available, use it as the first context acquisition path for repository understanding, existing-flow deep dives, business/product/domain deep dives, daily handoff, investigation, implementation planning, and unit-test planning tasks.",
     "",
     "Required first step:",
     "",
@@ -84,7 +84,7 @@ export function emitTokenOptInstructions(target: InstructionTarget = "generic"):
     "Business/product/domain research or deep dive -> task_type=research_business",
     "Implementation planning or small code change -> task_type=implement",
     "Unit-test planning or test-writing task -> task_type=write_unittest",
-    "API/endpoint flow -> task_type=api_flow",
+    "Existing business/API/user flow, flowchart, sequence diagram, or Mermaid request -> task_type=api_flow",
     "Field/schema impact -> task_type=field_impact",
     "Diff or PR review -> task_type=review_diff",
     "Startup/bootstrap flow -> task_type=startup_flow",

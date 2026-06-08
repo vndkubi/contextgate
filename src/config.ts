@@ -34,7 +34,7 @@ export const DEFAULT_CONFIG: TokenOptConfig = {
   context: {
     enableSecretBlock: true,
     userPromptGuidance:
-      "TokenOpt is active. When tokenopt MCP tools are available, treat natural repo prompts such as investigate, research business/domain, deep dive a product, plan, implement, write tests, review, or build handoff as a signal to call tokenopt_compile_evidence first with the inferred task_type. If the packet is answerable, answer from it instead of replaying shell/search/file reads; otherwise use only bounded followups."
+      "TokenOpt is active. When tokenopt MCP tools are available, treat natural repo prompts such as investigate a flow, understand/draw a business flow, research business/domain, deep dive a product, plan, implement, write tests, review, or build handoff as a signal to call tokenopt_compile_evidence first with the inferred task_type. If the packet is answerable, answer from it instead of replaying shell/search/file reads; otherwise use only bounded followups."
   },
   paths: {},
   codex: {

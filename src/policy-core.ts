@@ -1,9 +1,9 @@
 import fs from "node:fs";
 import path from "node:path";
-import { readActiveEvidenceTaskState } from "./evidence-state.js";
+import { readActiveEvidenceTaskState, readEvidenceTaskState } from "./evidence-state.js";
 import { compressText, extractTextFromToolResponse, shouldCompressOutput } from "./log-compressor.js";
 import { commandLooksWrapped, tokenizeCommand } from "./shell.js";
-import type { PolicyDecision, PolicyRuntime, TokenOptConfig, TokenOptEvent } from "./types.js";
+import type { EvidenceFollowup, PolicyDecision, PolicyRuntime, TokenOptConfig, TokenOptEvent } from "./types.js";
 
 const LOCKFILE_NAMES = new Set([
   "package-lock.json",
@@ -78,14 +78,26 @@ function evaluatePreToolUse(event: TokenOptEvent, config: TokenOptConfig, runtim
       return { action: "allow" };
     }
 
-    const activeEvidence = readActiveEvidenceTaskState(config, runtime.repoRoot);
-    if (activeEvidence && detectShellSearch(command)) {
-      return {
-        action: "deny",
-        reason:
-          `TokenOpt answerability gate blocked shell search after answerable packet ${activeEvidence.packet.packet_id} ` +
-          `(${activeEvidence.packet.task_type}). Answer from the packet, or call tokenopt_compile_evidence for a changed task.`
-      };
+    if (detectShellSearch(command)) {
+      const activeEvidence = readActiveEvidenceTaskState(config, runtime.repoRoot);
+      if (activeEvidence) {
+        return {
+          action: "deny",
+          reason:
+            `TokenOpt answerability gate blocked shell search after answerable packet ${activeEvidence.packet.packet_id} ` +
+            `(${activeEvidence.packet.task_type}). Answer from the packet, or call tokenopt_compile_evidence for a changed task.`
+        };
+      }
+
+      const recentEvidence = readEvidenceTaskState(config, runtime.repoRoot);
+      if (recentEvidence && Date.parse(recentEvidence.packet.expires_at) > Date.now() && hasTokenOptFollowups(recentEvidence.packet.allowed_followups)) {
+        return {
+          action: "deny",
+          reason:
+            `TokenOpt blocked shell search after packet ${recentEvidence.packet.packet_id} (${recentEvidence.packet.task_type}). ` +
+            "Use the packet's allowed_followups with tokenopt_search/tokenopt_read_file instead."
+        };
+      }
     }
 
     const broadSearch = detectBroadSearch(command);
@@ -273,6 +285,10 @@ function detectShellSearch(command: string): boolean {
   }
   return /(?:^|[|;&]\s*)(?:rg|grep|findstr|ag|ack|Select-String|sls)\b/i.test(normalized) ||
     /(?:^|[|;&]\s*)git\s+grep\b/i.test(normalized);
+}
+
+function hasTokenOptFollowups(followups: EvidenceFollowup[]): boolean {
+  return followups.some((followup) => /^(?:tokenopt_search|tokenopt_read_file|tokenopt_project_facts)$/i.test(followup.tool));
 }
 
 function detectExpensiveTest(command: string, config: TokenOptConfig): string | undefined {

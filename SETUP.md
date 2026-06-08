@@ -127,10 +127,10 @@ Expected agent flow:
 2. If answerable=true and recommended_next_action=answer_now, answer from the packet.
 3. If missing items exist, use only allowed_followups.
 4. Redundant MCP exploration after answerable=true is gated.
-5. With Codex hooks trusted, shell grep/search after an answerable packet is denied too.
+5. With Codex hooks trusted, shell grep/search after a packet is denied when TokenOpt has already provided answer-now guidance or exact TokenOpt followups.
 ```
 
-For prompts such as "study business and deep dive that business", TokenOpt infers `task_type=research_business` and includes business purpose, likely users, core capabilities, major project areas, domain terms, doc signals, and final-answer sections in the evidence packet.
+For prompts such as "understand checkout flow end-to-end so I can draw Mermaid", TokenOpt infers `task_type=api_flow`, identifies candidate entrypoints/services/tests/docs, returns a diagram contract, and requires exact `tokenopt_search`/`tokenopt_read_file` followups before the final diagram. For prompts such as "study business and deep dive that business", TokenOpt infers `task_type=research_business` and includes business purpose, likely users, core capabilities, major project areas, domain terms, doc signals, and final-answer sections in the evidence packet.
 
 ## Codex Hooks Setup
 
