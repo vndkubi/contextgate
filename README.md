@@ -156,6 +156,8 @@ tokenopt-mcp+gate: MCP mode plus a deliberate redundant followup to verify answe
 
 Use `tokenopt-mcp-instructed` when proving whether normal prompts like "Investigate flow X" or "write unittest for class Y" route through TokenOpt after setup. The JSON rows include `userPrompt`, `injectedInstruction`, and `prompt` so the benchmark shows what the user wrote versus what the agent setup supplied.
 
+Do not paste `injectedInstruction`, `actualPromptSentToCodex`, or text such as `Project instruction injected by TokenOpt setup:` into a normal user prompt. Those fields are benchmark/report artifacts. A real prompt should contain only the actual task; repo instructions and MCP config supply TokenOpt guidance separately.
+
 Task sets:
 
 ```text

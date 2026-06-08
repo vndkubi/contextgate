@@ -177,6 +177,8 @@ Please help me write unit tests for OrderService
 
 should be routed by the instruction layer. The exact MCP tool name belongs in `.github/copilot-instructions.md`, `AGENTS.md`, or Codex hook context, not in every user prompt.
 
+Do not paste benchmark or setup-injection text into the chat prompt. Lines such as `Project instruction injected by TokenOpt setup:`, `The user may ask naturally...`, or `When TokenOpt MCP tools are available...` are internal setup/report text. Pasting them into a normal task duplicates instructions and commonly increases input tokens.
+
 ### 3. Verify inside Copilot CLI
 
 Start Copilot CLI in the target repo:
@@ -321,6 +323,8 @@ If missing is non-empty, use only allowed_followups in strict MCP-only mode; oth
 
 Task: <your actual task>
 ```
+
+User prompt should contain only the actual task. Do not include copied benchmark fields such as `injectedInstruction` or `actualPromptSentToCodex`.
 
 ## Troubleshooting
 

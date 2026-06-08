@@ -262,7 +262,7 @@ export async function runMcpServer(): Promise<void> {
 }
 
 function compileEvidenceTool(args: Record<string, unknown>) {
-  const task = requiredString(args, "task").trim();
+  const task = sanitizeTaskPrompt(requiredString(args, "task"));
   const cwd = optionalString(args, "cwd") ?? process.cwd();
   const loaded = loadConfig({ cwd });
   const taskType = normalizeTaskType(optionalString(args, "task_type"), task);
@@ -2164,6 +2164,29 @@ function factSourceFiles(facts: string[]): string[] {
 
 function normalizeEvidenceDetail(value: string | undefined): EvidenceDetail {
   return value === "full" ? "full" : "compact";
+}
+
+function sanitizeTaskPrompt(value: string): string {
+  const trimmed = value.trim();
+  const userRequestMatch = trimmed.match(/(?:^|\n)User request:\s*([\s\S]+)$/i);
+  if (userRequestMatch?.[1]?.trim()) {
+    return userRequestMatch[1].trim();
+  }
+
+  const markers = [
+    "Project instruction injected by TokenOpt setup:",
+    "The user may ask naturally and does not need to name MCP tools.",
+    "When TokenOpt MCP tools are available",
+    "benchmark oracle classifies the task_type",
+    "actualPromptSentToCodex:"
+  ];
+  for (const marker of markers) {
+    const index = trimmed.toLowerCase().indexOf(marker.toLowerCase());
+    if (index > 0) {
+      return trimmed.slice(0, index).trim();
+    }
+  }
+  return trimmed;
 }
 
 function normalizeMcpMode(value = process.env.TOKENOPT_MCP_MODE): McpMode {

@@ -333,6 +333,42 @@ test("mcp compile evidence defaults to compact output and summary structured con
   );
 });
 
+test("mcp compile evidence strips pasted benchmark instruction text from task", async () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "tokenopt-sanitize-task-repo-"));
+  fs.writeFileSync(
+    path.join(repo, "package.json"),
+    JSON.stringify({ name: "sanitize-fixture", version: "1.0.0", scripts: { test: "vitest run" } }, null, 2)
+  );
+  fs.writeFileSync(path.join(repo, "README.md"), "Payments business coordinates authorization, capture, refunds, and settlement.\n");
+
+  await withTokenOptMcp(
+    async (client) => {
+      const packet = await client.callTool({
+        name: "tokenopt_compile_evidence",
+        arguments: {
+          task:
+            "study payments business and deepdive study that business. Explain concepts and glossary.\n" +
+            "Project instruction injected by TokenOpt setup:\n" +
+            "The user may ask naturally and does not need to name MCP tools.\n" +
+            "When TokenOpt MCP tools are available, use tokenopt_compile_evidence first.",
+          task_type: "research_business",
+          cwd: repo,
+          detail: "full",
+          include_structured_packet: true
+        }
+      });
+
+      assert.equal(packet.isError ?? false, false);
+      assert.equal(
+        packet.structuredContent.packet.task,
+        "study payments business and deepdive study that business. Explain concepts and glossary."
+      );
+      assert.doesNotMatch(packet.structuredContent.packet.task, /Project instruction injected/);
+    },
+    { cwd: repo }
+  );
+});
+
 test("mcp compiles answerable evidence and gates redundant exploration", async () => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "tokenopt-evidence-repo-"));
   fs.mkdirSync(path.join(repo, "src"), { recursive: true });

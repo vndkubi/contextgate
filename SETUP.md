@@ -137,6 +137,8 @@ Expected agent flow:
 
 For prompts such as "understand checkout flow end-to-end so I can draw Mermaid", use TokenOpt only in strict MCP-only mode or when the packet can provide the full evidence path. In normal shell-enabled agent mode, start with narrow native search/read instead of calling TokenOpt first and then repeating the same work through shell. For prompts such as "study business and deep dive that business", TokenOpt can be useful because docs/inventory often provide enough evidence without shell fallback.
 
+Do not paste benchmark/report fields into normal prompts. Text such as `Project instruction injected by TokenOpt setup:`, `injectedInstruction`, or `actualPromptSentToCodex` is diagnostic output for benchmark reports, not something the user should include in chat.
+
 `tokenopt_compile_evidence` defaults to compact output. Full evidence is saved in `state_path`; pass `detail=full` only when debugging or producing a benchmark/audit report.
 
 ## Codex Hooks Setup

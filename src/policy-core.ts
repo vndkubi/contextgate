@@ -59,6 +59,16 @@ function evaluatePrompt(event: TokenOptEvent, config: TokenOptConfig): PolicyDec
     };
   }
 
+  if (containsInjectedTokenOptInstructionPaste(prompt)) {
+    return {
+      action: "deny",
+      reason:
+        "Prompt appears to include TokenOpt injected benchmark/setup instruction text. Do not paste lines like " +
+        "\"Project instruction injected by TokenOpt setup\" or \"When TokenOpt MCP tools are available\" into the user prompt. " +
+        "Send only the actual task, for example: \"Study <business/module> business flow, concepts, and glossary. Keep exploration bounded and cite evidence.\""
+    };
+  }
+
   const context = config.codegraph.enabled
     ? `${config.context.userPromptGuidance} CodeGraph is configured as an optional repository context provider; prefer bounded CodeGraph packs before broad raw file reads.`
     : config.context.userPromptGuidance;
@@ -309,6 +319,15 @@ function containsLikelySecret(text: string): boolean {
     /\b(?:api[_-]?key|secret|token)\s*[:=]\s*['"]?[A-Za-z0-9_\-.]{24,}/i
   ];
   return patterns.some((pattern) => pattern.test(text));
+}
+
+function containsInjectedTokenOptInstructionPaste(text: string): boolean {
+  return [
+    /Project instruction injected by TokenOpt setup:/i,
+    /The user may ask naturally and does not need to name MCP tools[\s\S]*When TokenOpt MCP tools are available/i,
+    /benchmark oracle classifies the task_type/i,
+    /actualPromptSentToCodex:/i
+  ].some((pattern) => pattern.test(text));
 }
 
 function normalizeRelativePath(target: string): string | undefined {

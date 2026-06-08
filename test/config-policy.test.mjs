@@ -105,6 +105,26 @@ test("user prompt injects TokenOpt MCP routing guidance for natural tasks", () =
   assert.match(decision.additionalContext, /MCP\+shell double-spend/);
 });
 
+test("user prompt blocks pasted TokenOpt benchmark instruction text", () => {
+  const loaded = loadConfig({ cwd: process.cwd(), env: {} });
+  const decision = evaluatePolicy(
+    {
+      source: "codex",
+      eventName: "user-prompt-submit",
+      cwd: process.cwd(),
+      prompt:
+        "study payments business and deepdive study that business. Project instruction injected by TokenOpt setup:\n" +
+        "The user may ask naturally and does not need to name MCP tools.\n" +
+        "When TokenOpt MCP tools are available, use tokenopt_compile_evidence as the first context acquisition path.",
+      raw: {}
+    },
+    loaded.config,
+    { repoRoot: process.cwd() }
+  );
+  assert.equal(decision.action, "deny");
+  assert.match(decision.reason, /Do not paste/);
+});
+
 test("mcp lockfile reads are denied", () => {
   const loaded = loadConfig({ cwd: process.cwd(), env: {} });
   const decision = evaluatePolicy(
