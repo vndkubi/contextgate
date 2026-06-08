@@ -11,6 +11,7 @@
     "README.md",
     "SETUP.md",
     "COPILOT_SETUP.md",
+    "PROMPT_PLAYBOOK.md",
     "tokenopt-separation-and-mcp-plan.md"
   ],
   "scripts": {
