@@ -1,6 +1,6 @@
-# TokenOpt Prompt Playbook
+# ContextGate Prompt Playbook
 
-This guide shows how to prompt agents so TokenOpt, CodeGraph, and native search/read are used only when they reduce context cost.
+This guide shows how to prompt agents so ContextGate, exposed by the current TokenOpt MCP tools, and native narrow search/read are used only when they reduce context cost.
 
 ## Core Rule
 
@@ -9,19 +9,19 @@ Do not force TokenOpt first for every task.
 Use the cheapest evidence path:
 
 ```text
-Broad repo/business/planning task -> TokenOpt cost gate.
-Exact code/call graph task -> CodeGraph.
+Broad repo/business/planning task -> ContextGate cost gate.
+Exact code/call flow task -> native narrow search/read.
 Known file/class task -> native narrow search/read.
 Review current diff -> diff/review context first.
-Never repeat the same evidence acquisition with TokenOpt + CodeGraph + shell.
+Never repeat the same evidence acquisition with ContextGate + shell/search/read.
 ```
 
 ## Setup Pattern
 
-TokenOpt needs two things to route normal prompts reliably:
+ContextGate needs two things to route normal prompts reliably:
 
 1. The `tokenopt` MCP server must be available to the agent.
-2. Repo or agent instructions must explain when to use TokenOpt as a cost gate.
+2. Repo or agent instructions must explain when to use ContextGate as a cost gate.
 
 For Copilot-style setup in a target repo:
 
@@ -63,7 +63,7 @@ Investigate the primary learning/recall flow and return files, symbols, risks, a
 Good explicit smoke-test prompt:
 
 ```text
-Use TokenOpt as a cost gate.
+Use ContextGate as a cost gate.
 Investigate the primary learning/recall flow.
 If the packet is answerable, answer from it and do not call shell/search again.
 ```
@@ -120,8 +120,8 @@ This table summarizes the route behavior from the 37-prompt real Codex benchmark
 | Unit-test planning or unknown owning test area | MCP-first strict, shell off | Yes for planning | `exact_symbol`: `-61.4%` total tokens, quality improved from `0.750` to `1.000` | For planning, TokenOpt is useful. For writing tests against a known class, use narrow reads directly. |
 | Review with a concrete diff or patch | Review evidence route | Yes if diff is present | Not separately isolated in this run | Give the actual diff. TokenOpt can compile review-shaped evidence. |
 | Review without a concrete diff | Hybrid fallback, shell on | No | `review_diff`: `+65.8%` total tokens, quality improved to `1.000` but expensive | Do not force MCP-first. Ask for the diff or use normal review flow. |
-| Small repo plus exact file/symbol | Bypass | No | Router marks this as negative control | Use native narrow read/search or CodeGraph. |
-| Exact class/method/line-level flow trace | Native narrow search/read or CodeGraph | Usually no | Hybrid double-spend risk | Use CodeGraph or narrow search/read directly unless you need a broad context summary first. |
+| Small repo plus exact file/symbol | Bypass | No | Router marks this as negative control | Use native narrow read/search. |
+| Exact class/method/line-level flow trace | Native narrow search/read | Usually no | Hybrid double-spend risk | Use narrow search/read directly unless you need a broad context summary first. |
 | Simple non-repo question or tiny command | Bypass | No | Not a TokenOpt workload | Answer directly or run the tiny command. |
 
 Aggregate from that benchmark:
@@ -139,12 +139,12 @@ Add this contract when you want to audit whether the agent chose the right path:
 
 ```text
 Start your answer with:
-Acquisition path: TokenOpt MCP | CodeGraph | native narrow search/read | diff context
+Acquisition path: ContextGate MCP | native narrow search/read | diff context
 Reason:
 Fallback used: yes/no
 ```
 
-If the answer says `Acquisition path: TokenOpt MCP` and then performs broad shell search or CodeGraph for the same evidence, that is a failed run.
+If the answer says `Acquisition path: ContextGate MCP` and then performs broad shell/search/read for the same evidence, that is a failed run.
 
 ## Standard Cost Router Prefix
 
@@ -153,14 +153,14 @@ Use this prefix for most natural tasks:
 ```text
 Choose the cheapest evidence path first.
 
-If this is a broad repo/business/planning task and TokenOpt MCP is available, use TokenOpt as a cost gate:
+If this is a broad repo/business/planning task and ContextGate MCP is available, use ContextGate as a cost gate:
 - Call tokenopt_compile_evidence once.
-- If answerable=true, answer from the packet and do not call shell/search/read/CodeGraph again for the same evidence.
+- If answerable=true, answer from the packet and do not call shell/search/read again for the same evidence.
 - If answerable=false, use only its allowed TokenOpt followups.
 
-If this is an exact code-flow/class/method/PBI task that needs line-level proof, do not call TokenOpt first. Use CodeGraph or narrow search/read directly.
+If this is an exact code-flow/class/method/PBI task that needs line-level proof, do not call ContextGate first. Use narrow search/read directly.
 
-Never do TokenOpt first and then repeat the same exploration with shell, search, or CodeGraph.
+Never do ContextGate first and then repeat the same exploration with shell, search, or read.
 
 Start the answer with:
 Acquisition path:
@@ -178,21 +178,21 @@ Task:
 | Broad repo overview, handoff, business summary | Optional after setup; mention if Copilot ignores MCP | `Use TokenOpt as a cost gate if it can replace broad exploration.` |
 | Benchmarking TokenOpt | Yes | `Use TokenOpt as the first acquisition path for this benchmark.` |
 | Copilot does not call MCP naturally | Yes | `Use the tokenopt-cost-gate agent if available.` |
-| Exact flow/class/method trace | Usually no | Use CodeGraph or narrow search/read directly. |
+| Exact flow/class/method trace | Usually no | Use narrow search/read directly. |
 | Known file/module implementation | Usually no | Start from the known file/module and run narrow validation. |
-| Review current diff | Usually no | Use diff context first; use CodeGraph only for unclear impact. |
+| Review current diff | Usually no | Use diff context first; use narrow search/read only for unclear impact. |
 
-## When To Mention CodeGraph
+## When To Bypass ContextGate
 
-Use CodeGraph when exact code structure matters:
+Bypass ContextGate when exact code structure is already the task:
 
 - Owning class/function/module discovery.
-- Call graph and dependency graph.
+- Call flow or dependency impact around a known symbol.
 - API/service/domain flow with line-level proof.
 - Impact analysis from a specific symbol or field.
 - Implementation where the owning code path is unknown.
 
-Do not call CodeGraph after TokenOpt if TokenOpt already returned `answerable=true`.
+Use native narrow search/read with bounded queries for those cases. Do not run a second exploration path after ContextGate already returned `answerable=true`.
 
 ## Prompt Samples
 
@@ -204,7 +204,7 @@ Use this when the user wants business understanding, glossary, and business flow
 Choose the cheapest evidence path first.
 
 This is a broad business/domain understanding task. If TokenOpt MCP is available, use tokenopt_compile_evidence once as a cost gate.
-If answerable=true, answer from the packet and do not call shell/search/read/CodeGraph again.
+If answerable=true, answer from the packet and do not call shell/search/read again.
 If answerable=false, use only allowed TokenOpt followups.
 
 Task:
@@ -225,7 +225,7 @@ Use the tokenopt-cost-gate agent if available.
 
 Choose the cheapest evidence path first:
 - Broad business/domain task -> TokenOpt MCP once.
-- Exact code-flow task -> CodeGraph or narrow search/read directly.
+- Exact code-flow task -> narrow search/read directly.
 - Never TokenOpt first plus shell fallback.
 
 Task:
@@ -240,7 +240,7 @@ Use this when line-level code proof is required. Do not force TokenOpt first.
 ```text
 This is an exact code-flow trace that needs line-level proof.
 Do not call TokenOpt first.
-Use CodeGraph if available for call graph/symbol ownership; otherwise use narrow search/read only.
+Use narrow search/read only for call flow and symbol ownership.
 Avoid broad repo scans.
 
 Task:
@@ -260,9 +260,9 @@ Choose the cheapest evidence path first.
 
 For this PBI, first decide:
 - Broad requirement/business understanding -> use TokenOpt MCP once.
-- Exact affected classes/functions/call graph -> use CodeGraph.
+- Exact affected classes/functions/call flow -> use native narrow search/read.
 - Known files/classes -> native narrow search/read.
-- Do not use TokenOpt and CodeGraph both unless the first path cannot answer.
+- Do not use ContextGate and native exploration for the same evidence unless the first path cannot answer.
 
 PBI:
 <paste PBI>
@@ -288,8 +288,8 @@ Fallback used:
 Choose the cheapest evidence path first.
 
 Use TokenOpt for broad implementation planning if it can summarize repo evidence cheaply.
-Use CodeGraph only if exact owning modules/classes/call graph are needed.
-Avoid TokenOpt + CodeGraph + shell double-spend.
+Use narrow search/read only if exact owning modules/classes/call flow are needed.
+Avoid ContextGate + shell/search/read double-spend.
 
 Task:
 Create an implementation plan for this requirement:
@@ -311,7 +311,7 @@ Return:
 Choose the cheapest evidence path first.
 
 This is requirement analysis. Use TokenOpt if broad repo/business evidence is enough.
-Use CodeGraph only for exact flow or symbol ownership.
+Use narrow search/read for exact flow or symbol ownership.
 
 Requirement:
 <paste requirement>
@@ -340,9 +340,9 @@ Use this for actual code changes. Do not force TokenOpt first if the owning file
 This is an implementation task.
 
 Choose the cheapest evidence path first:
-- If the owning area is unknown, use CodeGraph or narrow search/read to find exact files.
+- If the owning area is unknown, use ContextGate once for broad ownership discovery, or narrow search/read when likely terms are known.
 - Use TokenOpt only if broad planning is needed before finding ownership.
-- Do not use TokenOpt first and then repeat the same evidence acquisition with shell/CodeGraph.
+- Do not use ContextGate first and then repeat the same evidence acquisition with shell/search/read.
 
 Task:
 Implement this PBI:
@@ -368,7 +368,7 @@ Fallback used:
 This is a specific test-writing task.
 
 Do not call TokenOpt first if the target class/module is known.
-Use CodeGraph or narrow search/read to find the class, related tests, and existing test style.
+Use narrow search/read to find the class, related tests, and existing test style.
 Avoid broad scans and full-suite tests.
 
 Task:
@@ -389,7 +389,7 @@ Fallback used:
 Choose the cheapest evidence path first.
 
 If this is only test planning, use TokenOpt MCP as a cost gate.
-If exact class/test files are needed, use CodeGraph or narrow search/read.
+If exact class/test files are needed, use narrow search/read.
 
 Task:
 Plan unit tests for <class/module>.
@@ -403,7 +403,7 @@ Do not edit files yet.
 Review the current diff.
 
 Do not use TokenOpt first unless the diff lacks basic context.
-Use CodeGraph only if call graph or dependency impact is unclear.
+Use narrow search/read only if call flow or dependency impact is unclear.
 Focus on correctness, regressions, missing tests, security, and performance risks.
 
 Return:
@@ -419,7 +419,7 @@ Return:
 ```text
 Choose the cheapest evidence path first.
 
-This is an exact impact analysis task. Use CodeGraph if available for symbol/dependency impact.
+This is an exact impact analysis task. Start with narrow search/read around the field/schema for symbol/dependency impact.
 Use TokenOpt only if broad business/context summary is needed first.
 
 Task:
@@ -440,7 +440,7 @@ Return:
 This is an exact startup flow trace.
 
 Do not call TokenOpt first unless a broad repo overview is needed.
-Use CodeGraph or narrow search/read to identify entrypoints and initialization order.
+Use narrow search/read to identify entrypoints and initialization order.
 
 Task:
 Trace application startup/bootstrap flow.
@@ -487,17 +487,17 @@ Report:
 - answer quality
 ```
 
-### 15. TokenOpt + CodeGraph Router
+### 15. ContextGate-Only Router
 
-Use this when both MCP servers are available.
+Use this when ContextGate MCP is available and you want one optimized acquisition route.
 
 ```text
 Choose the cheapest evidence path first.
 
-Use TokenOpt MCP only as a cost gate for broad repo/business/planning tasks.
-Use CodeGraph only when exact code ownership, call graph, dependency graph, or symbol flow is needed.
-Do not call TokenOpt and CodeGraph both unless the first path cannot answer.
-Do not repeat the same evidence acquisition with shell/search after MCP.
+Use ContextGate MCP only as a cost gate for broad repo/business/planning tasks.
+Use native narrow search/read directly when exact code ownership, call flow, dependency impact, or symbol flow is needed.
+Do not call ContextGate and then repeat the same evidence acquisition with shell/search/read.
+Do not repeat the same evidence acquisition after MCP.
 
 Start the answer with:
 Acquisition path:
@@ -629,7 +629,7 @@ Trace <specific class or flow> line by line.
 Do not ask for all acquisition paths:
 
 ```text
-Use TokenOpt, CodeGraph, shell search, and read all relevant files.
+Use ContextGate first, then shell search, then read all relevant files.
 ```
 
 Those prompts commonly cause input tokens to increase.
@@ -666,7 +666,6 @@ Task: <actual broad task>
 Likely causes:
 
 - TokenOpt was called and then the agent repeated the same work with shell/search.
-- TokenOpt was called and then CodeGraph was called for the same evidence.
 - The prompt pasted benchmark fields such as `injectedInstruction` or `actualPromptSentToCodex`.
 - The task was exact code-level work where TokenOpt-first was not the cheapest path.
 
@@ -674,7 +673,7 @@ Fix:
 
 ```text
 Choose the cheapest evidence path first.
-Never do TokenOpt first and then repeat the same exploration with shell, search, or CodeGraph.
+Never do ContextGate first and then repeat the same exploration with shell, search, or read.
 Start your answer with Acquisition path, Reason, and Fallback used.
 ```
 
