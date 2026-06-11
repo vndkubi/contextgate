@@ -16,9 +16,10 @@ export type TaskClass =
   | "review_diff"
   | "debug_runtime"
   | "refactor_scope"
+  | "coding_coverage"
   | "exact_symbol"
   | "small_repo_bypass";
-export type ToolProfile = "explore" | "review" | "debug" | "refactor" | "exact" | "bypass";
+export type ToolProfile = "explore" | "review" | "debug" | "refactor" | "coding" | "exact" | "bypass";
 export type EvidenceTaskType =
   | "api_flow"
   | "field_impact"
@@ -143,6 +144,65 @@ export interface RouteDecision {
   confidence: number;
   promptSignals: string[];
   negativeControl: boolean;
+}
+
+export interface CodingSymbol {
+  id: string;
+  name: string;
+  kind: "class" | "interface" | "function" | "method" | "const" | "type" | "unknown";
+  language: "typescript" | "javascript" | "java" | "python" | "unknown";
+  file: string;
+  line: number;
+  signature: string;
+  confidence: number;
+}
+
+export interface SymbolPacket {
+  symbol: CodingSymbol;
+  definition_slice: {
+    file: string;
+    startLine: number;
+    endLine: number;
+    text: string;
+  };
+  imports: string[];
+  dependencies: string[];
+  callers: Array<{ file: string; line: number; text: string }>;
+  callees: string[];
+  nearby_tests: string[];
+  coverage: Record<string, EvidenceCoverageStatus>;
+}
+
+export interface TestNeighborPacket {
+  target: string;
+  source_files: string[];
+  test_files: string[];
+  naming_patterns: string[];
+  framework_hints: string[];
+  mocking_hints: string[];
+  coverage: Record<string, EvidenceCoverageStatus>;
+}
+
+export interface FailurePacket {
+  failure_kind: "typescript" | "javascript" | "python" | "java" | "test" | "unknown";
+  errors: Array<{
+    file?: string;
+    line?: number;
+    column?: number;
+    symbol?: string;
+    message: string;
+  }>;
+  suggested_slices: Array<{ file: string; startLine: number; maxLines: number; reason: string }>;
+  raw_lines_kept: number;
+}
+
+export interface CodingCoverageContract {
+  task_kind: "implement" | "write_unittest" | "fix_bug" | "debug_runtime" | "exact_symbol";
+  answerable: boolean;
+  confidence: number;
+  coverage: Record<string, EvidenceCoverageStatus>;
+  missing: string[];
+  allowed_followups: EvidenceFollowup[];
 }
 
 export interface CoverageCertificate {

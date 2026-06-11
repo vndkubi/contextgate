@@ -55,16 +55,120 @@ test("mcp full mode exposes command and project facts tools", async () => {
         "tokenopt_assemble_spring_context",
         "tokenopt_business_contract",
         "tokenopt_compile_evidence",
+        "tokenopt_failure_packet",
         "tokenopt_impact_analysis",
         "tokenopt_jakarta_annotation_filter",
         "tokenopt_prepare_java_diff",
         "tokenopt_project_facts",
         "tokenopt_read_file",
         "tokenopt_run_command",
-        "tokenopt_search"
+        "tokenopt_search",
+        "tokenopt_symbol_packet",
+        "tokenopt_symbols_find",
+        "tokenopt_test_neighbors"
       ]);
     },
     { env: { TOKENOPT_MCP_MODE: "full" } }
+  );
+});
+
+test("mcp full mode runs coding coverage tools", async () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "tokenopt-coding-mcp-repo-"));
+  fs.mkdirSync(path.join(repo, "src", "orders"), { recursive: true });
+  fs.mkdirSync(path.join(repo, "test", "orders"), { recursive: true });
+  fs.writeFileSync(path.join(repo, "package.json"), JSON.stringify({ name: "coding-mcp", scripts: { test: "vitest run" } }, null, 2));
+  fs.writeFileSync(
+    path.join(repo, "src", "orders", "OrderService.ts"),
+    [
+      "import { OrderRepository } from './OrderRepository';",
+      "export class OrderService {",
+      "  constructor(private repo: OrderRepository) {}",
+      "  authorizePayment(orderId: string): boolean {",
+      "    if (!orderId) throw new Error('missing order');",
+      "    return this.repo.find(orderId).status === 'ready';",
+      "  }",
+      "}"
+    ].join("\n")
+  );
+  fs.writeFileSync(
+    path.join(repo, "test", "orders", "OrderService.test.ts"),
+    "import { describe, it, expect, vi } from 'vitest';\ndescribe('OrderService', () => { it('works', () => { expect(vi.fn()).toBeDefined(); }); });\n"
+  );
+
+  await withTokenOptMcp(
+    async (client) => {
+      const symbols = await client.callTool({
+        name: "tokenopt_symbols_find",
+        arguments: { query: "OrderService", cwd: repo }
+      });
+      assert.equal(symbols.isError ?? false, false);
+      assert.match(symbols.content[0].text, /OrderService/);
+
+      const packet = await client.callTool({
+        name: "tokenopt_symbol_packet",
+        arguments: { query: "OrderService", cwd: repo }
+      });
+      assert.equal(packet.isError ?? false, false);
+      assert.match(packet.content[0].text, /TokenOpt symbol packet/);
+      assert.match(packet.content[0].text, /Nearby tests:/);
+
+      const neighbors = await client.callTool({
+        name: "tokenopt_test_neighbors",
+        arguments: { target: "src/orders/OrderService.ts", cwd: repo }
+      });
+      assert.equal(neighbors.isError ?? false, false);
+      assert.match(neighbors.content[0].text, /OrderService\.test\.ts/);
+
+      const failure = await client.callTool({
+        name: "tokenopt_failure_packet",
+        arguments: { output: "src/orders/OrderService.ts(4,8): error TS2304: Cannot find name 'OrderStatus'.", cwd: repo }
+      });
+      assert.equal(failure.isError ?? false, false);
+      assert.match(failure.content[0].text, /failure_kind: typescript/);
+      assert.match(failure.content[0].text, /OrderService\.ts/);
+    },
+    { cwd: repo, env: { TOKENOPT_MCP_MODE: "full" } }
+  );
+});
+
+test("mcp compile evidence uses coding coverage for unit-test tasks", async () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "tokenopt-coding-evidence-repo-"));
+  fs.mkdirSync(path.join(repo, "src", "orders"), { recursive: true });
+  fs.writeFileSync(path.join(repo, "package.json"), JSON.stringify({ name: "coding-evidence", scripts: { test: "vitest run" } }, null, 2));
+  fs.writeFileSync(
+    path.join(repo, "src", "orders", "OrderService.ts"),
+    [
+      "export class OrderService {",
+      "  authorizePayment(orderId: string): boolean {",
+      "    return Boolean(orderId);",
+      "  }",
+      "}"
+    ].join("\n")
+  );
+
+  await withTokenOptMcp(
+    async (client) => {
+      const packet = await client.callTool({
+        name: "tokenopt_compile_evidence",
+        arguments: {
+          task: "Write unit tests for OrderService",
+          task_type: "write_unittest",
+          cwd: repo,
+          detail: "full",
+          include_structured_packet: true
+        }
+      });
+      assert.equal(packet.isError ?? false, false);
+      assert.match(packet.content[0].text, /route_decision: coding_coverage\/coding\/compile/);
+      assert.match(packet.content[0].text, /answerable: false/);
+      assert.match(packet.content[0].text, /target_symbol: covered/);
+      assert.match(packet.content[0].text, /existing_test_neighbor: missing/);
+      assert.match(packet.content[0].text, /tokenopt_symbol_packet/);
+      assert.equal(packet.structuredContent.packetSummary.route.taskClass, "coding_coverage");
+      assert.equal(packet.structuredContent.packetSummary.answerable, false);
+      assert.equal(packet.structuredContent.packetSummary.allowed_followups.some((followup) => followup.tool === "tokenopt_symbol_packet"), true);
+    },
+    { cwd: repo, env: { TOKENOPT_MCP_MODE: "full" } }
   );
 });
 

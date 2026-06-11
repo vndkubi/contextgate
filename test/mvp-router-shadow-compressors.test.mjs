@@ -12,7 +12,9 @@ import { routeTask } from "../dist/router.js";
 
 test("router classifies review, debug, refactor, exact, and small-repo bypass tasks", () => {
   assert.equal(routeTask({ task: "Review this PR diff for changed files" }).taskClass, "review_diff");
-  assert.equal(routeTask({ task: "Debug this Spring stack trace Caused by NullPointerException" }).taskClass, "debug_runtime");
+  assert.equal(routeTask({ task: "Debug this Spring stack trace Caused by NullPointerException" }).taskClass, "coding_coverage");
+  assert.equal(routeTask({ task: "Implement validation in OrderService" }).taskClass, "coding_coverage");
+  assert.equal(routeTask({ task: "Write unit tests for OrderService" }).taskClass, "coding_coverage");
   assert.equal(routeTask({ task: "Refactor OrderService to extract validation" }).taskClass, "refactor_scope");
   assert.equal(routeTask({ task: "Find usages of PaymentGateway.authorize" }).taskClass, "exact_symbol");
 

@@ -87,15 +87,23 @@ tokenopt_jakarta_annotation_filter
 tokenopt_assemble_spring_context
 tokenopt_business_contract
 tokenopt_impact_analysis
+tokenopt_symbols_find
+tokenopt_symbol_packet
+tokenopt_test_neighbors
+tokenopt_failure_packet
 ```
 
 In this mode, shell commands, searches, and file reads can be routed through TokenOpt-controlled tools that deny broad reads/searches, return bounded file slices, compress command output, and preserve raw logs under the user cache.
+
+Full mode also exposes the regex-lite Coding Coverage Layer. For `implement`, `write_unittest`, and failure/debug tasks, `tokenopt_compile_evidence` now requires exact coding coverage before `answerable=true`: target symbol, signature or definition slice, dependencies/usages, test neighbors/style, build/test command, and parsed failure context when available. Missing coverage returns exact followups such as `tokenopt_symbols_find`, `tokenopt_symbol_packet`, `tokenopt_test_neighbors`, or `tokenopt_failure_packet` instead of treating repo inventory as enough context.
 
 `rg` is only the fast search provider, not a hard requirement. MCP search and project inventory try providers in this order: `rg`, `git`, then a bounded built-in Node scanner. Tool output includes `searchProvider` so benchmark reports and agent transcripts show which provider was used instead of stopping at "rg not found".
 
 `tokenopt_compile_evidence` is a cost gate, not a mandatory extra step. Use it first when it can replace broad exploration: onboarding/build handoff, repo overview, business/domain summary from docs/inventory, implementation planning, and unit-test planning. Do not use MCP-first for exact existing-flow, class, method, or PBI deep dives when the agent will still need native shell/search reads; that hybrid path spends MCP context and then pays the normal shell cost again. For those tasks, either use normal narrow shell/search directly or run a strict MCP-only session with shell disabled. If the packet is `answerable=true` and recommends `answer_now`, TokenOpt stores short-lived repo state and gates redundant MCP searches/reads/commands with a compact "answer now" response. Codex hooks can also deny shell grep/search after an answerable packet, or after a non-answerable packet has TokenOpt followups; MCP alone cannot disable a host shell tool.
 
 When a prompt names a specific target such as a module, class, route, flow, or business capability, TokenOpt requires packet evidence to mention that target before `answerable=true`. If target-specific evidence is missing, the packet stays `answerable=false`, marks `target_specific_evidence=missing`, and returns exact TokenOpt followups instead of letting the agent switch to raw shell/search.
+
+For coding tasks, target matching is stricter than suffix matching. A request for `UnknownBillingService` cannot be marked covered just because another `*Service` symbol exists; the packet stays non-answerable until the exact target is found or the agent follows the bounded coverage followups.
 
 To avoid MCP overhead becoming larger than the saved context, `tokenopt_compile_evidence` returns compact output by default and only returns a small `packetSummary` in structured content. The full packet is stored in `state_path`. Use `detail=full` or `include_structured_packet=true` only for debugging, quality audits, or benchmark reports.
 

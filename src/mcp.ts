@@ -6,6 +6,10 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { assembleSpringContext } from "./assemblers/spring-context-assembler.js";
+import { compileCodingCoverageEvidence } from "./coding/coverage-contract.js";
+import { parseFailurePacket } from "./coding/failure-packet.js";
+import { buildSymbolPacket, findCodingSymbols } from "./coding/symbol-index.js";
+import { findTestNeighbors } from "./coding/test-neighbors.js";
 import { loadConfig } from "./config.js";
 import { readActiveEvidenceTaskState, writeEvidenceTaskState } from "./evidence-state.js";
 import { executeWrappedShellCommand } from "./exec.js";
@@ -25,10 +29,13 @@ import type {
   EvidenceFollowup,
   EvidencePacket,
   EvidenceTaskType,
+  FailurePacket,
   LoadedConfig,
   OutputPolicy,
   PolicyDecision,
   RouteDecision,
+  SymbolPacket,
+  TestNeighborPacket,
   TokenOptConfig,
   TokenOptEvent
 } from "./types.js";
@@ -46,7 +53,11 @@ const FULL_MCP_TOOL_NAMES = new Set([
   "tokenopt_jakarta_annotation_filter",
   "tokenopt_assemble_spring_context",
   "tokenopt_business_contract",
-  "tokenopt_impact_analysis"
+  "tokenopt_impact_analysis",
+  "tokenopt_symbols_find",
+  "tokenopt_symbol_packet",
+  "tokenopt_test_neighbors",
+  "tokenopt_failure_packet"
 ]);
 
 interface RepoInventory {
@@ -351,6 +362,102 @@ export async function runMcpServer(): Promise<void> {
           idempotentHint: true,
           openWorldHint: false
         }
+      },
+      {
+        name: "tokenopt_symbols_find",
+        title: "Find Coding Symbols",
+        description: "Regex-lite symbol discovery for coding tasks. Returns compact candidates with file, line, signature, and confidence.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            query: { type: "string", description: "Class, function, file, or task target." },
+            language: {
+              type: "string",
+              enum: ["typescript", "javascript", "java", "python", "unknown"],
+              description: "Optional language filter."
+            },
+            kind: {
+              type: "string",
+              enum: ["class", "interface", "function", "method", "const", "type", "unknown"],
+              description: "Optional symbol kind filter."
+            },
+            limit: { type: "number", description: "Maximum candidates, capped at 50." },
+            cwd: { type: "string", description: "Working directory." }
+          },
+          additionalProperties: false
+        },
+        annotations: {
+          title: "TokenOpt symbols find",
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false
+        }
+      },
+      {
+        name: "tokenopt_symbol_packet",
+        title: "Build Symbol Packet",
+        description: "Return signature, bounded definition slice, imports, dependencies, callers, callees, and nearby tests for a symbol.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            symbol_id: { type: "string", description: "Symbol id returned by tokenopt_symbols_find." },
+            query: { type: "string", description: "Fallback class/function/file query." },
+            cwd: { type: "string", description: "Working directory." }
+          },
+          additionalProperties: false
+        },
+        annotations: {
+          title: "TokenOpt symbol packet",
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false
+        }
+      },
+      {
+        name: "tokenopt_test_neighbors",
+        title: "Find Test Neighbors",
+        description: "Find nearby tests, naming patterns, framework hints, and mocking style for a source file or symbol.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            target: { type: "string", description: "Source file, class, function, or module." },
+            symbol_name: { type: "string", description: "Optional symbol name." },
+            limit: { type: "number", description: "Maximum test candidates, capped at 50." },
+            cwd: { type: "string", description: "Working directory." }
+          },
+          required: ["target"],
+          additionalProperties: false
+        },
+        annotations: {
+          title: "TokenOpt test neighbors",
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false
+        }
+      },
+      {
+        name: "tokenopt_failure_packet",
+        title: "Parse Failure Packet",
+        description: "Parse compiler/test/runtime output into compact failure locations and suggested file slices.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            output: { type: "string", description: "Compiler, test, or stack-trace output." },
+            cwd: { type: "string", description: "Working directory. Accepted for consistency; not required." }
+          },
+          required: ["output"],
+          additionalProperties: false
+        },
+        annotations: {
+          title: "TokenOpt failure packet",
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false
+        }
       }
   ];
 
@@ -369,7 +476,7 @@ export async function runMcpServer(): Promise<void> {
     try {
       switch (request.params.name) {
         case "tokenopt_compile_evidence":
-          return compileEvidenceTool(args);
+          return compileEvidenceTool(args, mcpMode);
         case "tokenopt_run_command":
           return await runCommandTool(args);
         case "tokenopt_search":
@@ -388,6 +495,14 @@ export async function runMcpServer(): Promise<void> {
           return businessContractTool(args);
         case "tokenopt_impact_analysis":
           return impactAnalysisTool(args);
+        case "tokenopt_symbols_find":
+          return symbolsFindTool(args);
+        case "tokenopt_symbol_packet":
+          return symbolPacketTool(args);
+        case "tokenopt_test_neighbors":
+          return testNeighborsTool(args);
+        case "tokenopt_failure_packet":
+          return failurePacketTool(args);
         default:
           return textResult(`Unknown TokenOpt tool: ${request.params.name}`, true);
       }
@@ -399,7 +514,7 @@ export async function runMcpServer(): Promise<void> {
   await server.connect(new StdioServerTransport());
 }
 
-function compileEvidenceTool(args: Record<string, unknown>) {
+function compileEvidenceTool(args: Record<string, unknown>, mcpMode: McpMode = "lite") {
   const task = sanitizeTaskPrompt(requiredString(args, "task"));
   const cwd = optionalString(args, "cwd") ?? process.cwd();
   const loaded = loadConfig({ cwd });
@@ -471,7 +586,10 @@ function compileEvidenceTool(args: Record<string, unknown>) {
     tokens_est: estimateTokens(structureFacts.join("\n"))
   });
 
-  const taskSpecific = compileTaskSpecificEvidence(taskType, task, loaded.repoRoot, evidence.length + 1, evidenceContext);
+  const taskSpecific = compileTaskSpecificEvidence(taskType, task, loaded.repoRoot, evidence.length + 1, evidenceContext, {
+    hasBuildFacts,
+    codingToolsAvailable: mcpMode === "full"
+  });
   if (taskSpecific) {
     evidence.push(...taskSpecific.evidence);
   }
@@ -480,6 +598,7 @@ function compileEvidenceTool(args: Record<string, unknown>) {
   const initialAnswerable = taskSpecific?.answerable ?? baseAnswerable;
   const specificity = checkTargetSpecificity(task, taskType, evidence);
   const answerable = initialAnswerable && specificity.missing.length === 0;
+  const preferTaskSpecificFollowups = route.taskClass === "coding_coverage" && taskSpecific?.allowedFollowups.length;
   const coverage = {
     ...buildCoverage(taskType, hasBuildFacts, inventory.totalFiles > 0, Boolean(overview), structureFacts, qualityRubric),
     ...(taskSpecific?.coverage ?? {}),
@@ -505,6 +624,8 @@ function compileEvidenceTool(args: Record<string, unknown>) {
         ];
   const allowedFollowups = answerable
     ? []
+    : preferTaskSpecificFollowups
+      ? taskSpecific!.allowedFollowups
     : specificity.missing.length > 0
       ? buildTargetSpecificFollowups(specificity.missing)
     : taskSpecific?.allowedFollowups.length
@@ -1330,6 +1451,154 @@ function impactAnalysisTool(args: Record<string, unknown>) {
   return textResult(text, false, { ...result });
 }
 
+function symbolsFindTool(args: Record<string, unknown>) {
+  const cwd = optionalString(args, "cwd") ?? process.cwd();
+  const loaded = loadConfig({ cwd });
+  const query = optionalString(args, "query") ?? "";
+  const symbols = findCodingSymbols({
+    repoRoot: loaded.repoRoot,
+    query,
+    language: normalizeSymbolLanguage(optionalString(args, "language")),
+    kind: normalizeSymbolKind(optionalString(args, "kind")),
+    limit: clampInteger(optionalNumber(args, "limit") ?? 20, 1, 50)
+  });
+  const text = [
+    "TokenOpt coding symbols",
+    `query: ${query || "<empty>"}`,
+    `repoRoot: ${loaded.repoRoot}`,
+    `count: ${symbols.length}`,
+    "",
+    ...(symbols.length > 0
+      ? symbols.map((symbol) => `- ${symbol.id} ${symbol.kind} ${symbol.language} confidence=${symbol.confidence.toFixed(2)} signature=${symbol.signature.slice(0, 180)}`)
+      : ["- none"])
+  ].join("\n");
+  return textResult(text, false, { symbols });
+}
+
+function symbolPacketTool(args: Record<string, unknown>) {
+  const cwd = optionalString(args, "cwd") ?? process.cwd();
+  const loaded = loadConfig({ cwd });
+  const symbolId = optionalString(args, "symbol_id");
+  const query = optionalString(args, "query");
+  if (!symbolId && !query) {
+    return textResult("TokenOpt symbol packet requires symbol_id or query.", true);
+  }
+  const packet = buildSymbolPacket({ repoRoot: loaded.repoRoot, symbolId, query });
+  if (!packet) {
+    return textResult(`TokenOpt symbol packet found no symbol for ${symbolId ?? query ?? "<missing>"}.`, true);
+  }
+  return textResult(formatSymbolPacket(packet), false, { packet });
+}
+
+function testNeighborsTool(args: Record<string, unknown>) {
+  const cwd = optionalString(args, "cwd") ?? process.cwd();
+  const loaded = loadConfig({ cwd });
+  const target = requiredString(args, "target");
+  const packet = findTestNeighbors({
+    repoRoot: loaded.repoRoot,
+    target,
+    symbolName: optionalString(args, "symbol_name"),
+    limit: clampInteger(optionalNumber(args, "limit") ?? 12, 1, 50)
+  });
+  return textResult(formatTestNeighborPacket(packet), false, { packet });
+}
+
+function failurePacketTool(args: Record<string, unknown>) {
+  const output = requiredString(args, "output");
+  const packet = parseFailurePacket({ output });
+  return textResult(formatFailurePacket(packet), false, { packet });
+}
+
+function formatSymbolPacket(packet: SymbolPacket): string {
+  return [
+    "TokenOpt symbol packet",
+    `symbol: ${packet.symbol.name}`,
+    `id: ${packet.symbol.id}`,
+    `kind: ${packet.symbol.kind}`,
+    `language: ${packet.symbol.language}`,
+    `file: ${packet.symbol.file}`,
+    `line: ${packet.symbol.line}`,
+    `signature: ${packet.symbol.signature}`,
+    `definition_slice: ${packet.definition_slice.file}:${packet.definition_slice.startLine}-${packet.definition_slice.endLine}`,
+    "",
+    "Coverage:",
+    ...Object.entries(packet.coverage).map(([key, value]) => `- ${key}: ${value}`),
+    "",
+    "Imports/dependencies:",
+    ...(packet.imports.length > 0 ? packet.imports.slice(0, 20).map((item) => `- ${item}`) : ["- none"]),
+    ...(packet.dependencies.length > 0 ? packet.dependencies.slice(0, 20).map((item) => `- dependency:${item}`) : []),
+    "",
+    "Callers:",
+    ...(packet.callers.length > 0 ? packet.callers.slice(0, 20).map((caller) => `- ${caller.file}:${caller.line}: ${caller.text}`) : ["- none"]),
+    "",
+    "Callees:",
+    ...(packet.callees.length > 0 ? packet.callees.slice(0, 30).map((callee) => `- ${callee}`) : ["- none"]),
+    "",
+    "Nearby tests:",
+    ...(packet.nearby_tests.length > 0 ? packet.nearby_tests.slice(0, 20).map((file) => `- ${file}`) : ["- none"]),
+    "",
+    "Definition:",
+    packet.definition_slice.text
+  ].join("\n");
+}
+
+function formatTestNeighborPacket(packet: TestNeighborPacket): string {
+  return [
+    "TokenOpt test neighbors",
+    `target: ${packet.target}`,
+    "",
+    "Coverage:",
+    ...Object.entries(packet.coverage).map(([key, value]) => `- ${key}: ${value}`),
+    "",
+    "Source files:",
+    ...(packet.source_files.length > 0 ? packet.source_files.slice(0, 20).map((file) => `- ${file}`) : ["- none"]),
+    "",
+    "Test files:",
+    ...(packet.test_files.length > 0 ? packet.test_files.slice(0, 30).map((file) => `- ${file}`) : ["- none"]),
+    "",
+    "Naming patterns:",
+    ...(packet.naming_patterns.length > 0 ? packet.naming_patterns.map((item) => `- ${item}`) : ["- none"]),
+    "",
+    "Framework hints:",
+    ...(packet.framework_hints.length > 0 ? packet.framework_hints.map((item) => `- ${item}`) : ["- none"]),
+    "",
+    "Mocking hints:",
+    ...(packet.mocking_hints.length > 0 ? packet.mocking_hints.map((item) => `- ${item}`) : ["- none"])
+  ].join("\n");
+}
+
+function formatFailurePacket(packet: FailurePacket): string {
+  return [
+    "TokenOpt failure packet",
+    `failure_kind: ${packet.failure_kind}`,
+    `errors: ${packet.errors.length}`,
+    "",
+    "Errors:",
+    ...(packet.errors.length > 0
+      ? packet.errors.slice(0, 30).map((error) => `- ${error.file ?? "<unknown>"}:${error.line ?? "?"}${error.column ? `:${error.column}` : ""} ${error.symbol ? `[${error.symbol}] ` : ""}${error.message}`)
+      : ["- none"]),
+    "",
+    "Suggested slices:",
+    ...(packet.suggested_slices.length > 0
+      ? packet.suggested_slices.map((slice) => `- ${slice.file}:${slice.startLine}+${slice.maxLines} ${slice.reason}`)
+      : ["- none"])
+  ].join("\n");
+}
+
+function normalizeSymbolLanguage(value: string | undefined): SymbolPacket["symbol"]["language"] | undefined {
+  if (value === "typescript" || value === "javascript" || value === "java" || value === "python" || value === "unknown") {
+    return value;
+  }
+  return undefined;
+}
+
+function normalizeSymbolKind(value: string | undefined): SymbolPacket["symbol"]["kind"] | undefined {
+  if (value === "class" || value === "interface" || value === "function" || value === "method" || value === "const" || value === "type" || value === "unknown") {
+    return value;
+  }
+  return undefined;
+}
+
 function readGitDiff(cwd: string, staged: boolean): string {
   const args = staged ? ["diff", "--cached"] : ["diff"];
   const result = spawnSync("git", args, {
@@ -1506,7 +1775,8 @@ function compileTaskSpecificEvidence(
   task: string,
   repoRoot: string,
   firstEvidenceIndex: number,
-  context: EvidenceContext
+  context: EvidenceContext,
+  options: { hasBuildFacts: boolean; codingToolsAvailable: boolean }
 ): TaskSpecificEvidence | undefined {
   if (taskType === "review_diff") {
     return compileReviewDiffEvidence(task, repoRoot, firstEvidenceIndex);
@@ -1516,6 +1786,24 @@ function compileTaskSpecificEvidence(
   }
   if (taskType === "api_flow") {
     return compileFlowEvidence(task, firstEvidenceIndex, context);
+  }
+  const coding = compileCodingCoverageEvidence({
+    repoRoot,
+    task,
+    taskType,
+    firstEvidenceIndex,
+    hasBuildFacts: options.hasBuildFacts,
+    codingToolsAvailable: options.codingToolsAvailable
+  });
+  if (coding) {
+    return {
+      answerable: coding.answerable,
+      confidence: coding.confidence,
+      coverage: coding.coverage,
+      evidence: coding.evidence,
+      missing: coding.missing,
+      allowedFollowups: coding.allowedFollowups
+    };
   }
   return undefined;
 }
@@ -2453,9 +2741,8 @@ function isEvidenceAnswerable(
     case "research_business":
       return hasInventory && (hasOverview || hasBuildFacts);
     case "implement":
-      return hasInventory && hasBuildFacts && hasSourceAreas;
     case "write_unittest":
-      return hasBuildFacts && hasInventory && (hasTestAreas || hasSourceAreas);
+      return false;
     default:
       return false;
   }
@@ -2542,16 +2829,22 @@ function buildAnswerContract(
     case "implement":
       return {
         required_sections: ["Goal", "Current evidence", "Files to inspect/change", "Implementation plan", "Tests", "Risks/unknowns"],
-        evidence_rules: commonEvidenceRules,
-        quality_checks: ["Names exact candidate files/symbols.", "Keeps plan actionable and testable.", ...qualityRubric],
+        evidence_rules: [
+          ...commonEvidenceRules,
+          "Do not mark implementation evidence complete without target symbol, bounded definition slice, related types/usages, test neighbor, and build/test command coverage."
+        ],
+        quality_checks: ["Names exact candidate files/symbols.", "Uses coding coverage dimensions instead of repo inventory alone.", "Keeps plan actionable and testable.", ...qualityRubric],
         failure_conditions: commonFailureConditions,
         user_rubric: qualityRubric
       };
     case "write_unittest":
       return {
         required_sections: ["Target class/module", "Behavior to cover", "Test file location", "Fixtures/mocks", "Assertions", "Targeted command"],
-        evidence_rules: commonEvidenceRules,
-        quality_checks: ["Tests map to business behavior and likely failure paths.", "Avoids full-suite command as first verification.", ...qualityRubric],
+        evidence_rules: [
+          ...commonEvidenceRules,
+          "Do not mark unit-test evidence complete without target symbol, public API/signature, dependencies, existing test neighbor, test style, and build/test command coverage."
+        ],
+        quality_checks: ["Tests map to business behavior and likely failure paths.", "Uses existing test style and neighbor evidence.", "Avoids full-suite command as first verification.", ...qualityRubric],
         failure_conditions: commonFailureConditions,
         user_rubric: qualityRubric
       };

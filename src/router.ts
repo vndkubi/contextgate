@@ -31,6 +31,13 @@ export function routeTask(input: RouteTaskInput): RouteDecision {
     ]);
   }
 
+  if (isCodingCoveragePrompt(task, requestedTaskType)) {
+    return decision("coding_coverage", requestedTaskType ?? inferCodingTaskType(task), "coding", "compile", [
+      "Prompt is a coding task; require symbol/test/failure coverage before answerability.",
+      ...signals
+    ]);
+  }
+
   if (/\b(stack trace|exception|failing test|build failure|runtime|root cause|diagnose|debug|caused by)\b/i.test(task)) {
     return decision("debug_runtime", requestedTaskType ?? "investigate", "debug", "compile", [
       "Prompt is runtime/debug oriented; preserve failure slices and allow exact fallback for missing frames.",
@@ -72,7 +79,7 @@ export function taskClassFromTaskType(taskType: EvidenceTaskType): TaskClass {
       return "exact_symbol";
     case "implement":
     case "write_unittest":
-      return "refactor_scope";
+      return "coding_coverage";
     case "investigate":
       return "debug_runtime";
     default:
@@ -87,7 +94,7 @@ function decision(
   action: RouteDecision["action"],
   reasons: string[]
 ): RouteDecision {
-  const confidence = taskClass === "broad_flow" ? 0.72 : taskClass === "small_repo_bypass" ? 0.88 : 0.82;
+  const confidence = taskClass === "broad_flow" ? 0.72 : taskClass === "small_repo_bypass" ? 0.88 : taskClass === "coding_coverage" ? 0.84 : 0.82;
   return {
     taskClass,
     taskType,
@@ -98,6 +105,23 @@ function decision(
     promptSignals: reasons.slice(1, 12),
     negativeControl: taskClass === "small_repo_bypass" || taskClass === "exact_symbol"
   };
+}
+
+function isCodingCoveragePrompt(task: string, requestedTaskType?: EvidenceTaskType): boolean {
+  if (requestedTaskType === "implement" || requestedTaskType === "write_unittest") {
+    return true;
+  }
+  return /\b(unit tests?|unittest|write tests?|add tests?|test coverage|implement|add feature|code change|modify|patch|fix bug|bugfix|fix failing|failing test|stack trace|exception|traceback|build failure|compilation error|debug|root cause|caused by)\b/i.test(task);
+}
+
+function inferCodingTaskType(task: string): EvidenceTaskType {
+  if (/\b(unit tests?|unittest|write tests?|add tests?|test coverage)\b/i.test(task)) {
+    return "write_unittest";
+  }
+  if (/\b(stack trace|exception|traceback|build failure|compilation error|debug|root cause|caused by|fix bug|bugfix|fix failing|failing test)\b/i.test(task)) {
+    return "investigate";
+  }
+  return "implement";
 }
 
 function collectPromptSignals(task: string): string[] {

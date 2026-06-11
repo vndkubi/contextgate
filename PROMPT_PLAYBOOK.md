@@ -116,6 +116,7 @@ This table summarizes the route behavior from the 37-prompt real Codex benchmark
 | --- | --- | --- | --- | --- |
 | Broad repo flow, onboarding, context inspection, dependency/build analysis | MCP-first strict, shell off | Yes | `broad_flow`: `-82.3%` total tokens, quality improved from `0.845` to `0.905` | Use `tokenopt_compile_evidence` once, then answer or use exact allowed followups. |
 | Runtime/debug/build failure/root cause | MCP-first strict, shell off | Yes | `debug_runtime`: `-78.1%` total tokens, quality improved from `0.778` to `0.944` | Use TokenOpt first to compress failure evidence and keep followups exact. |
+| Coding implementation/unit-test with unknown owner | Full-mode coding coverage | Yes if full-mode tools are available | New coverage layer; benchmark pending | Use `tokenopt_compile_evidence` once, then follow only `tokenopt_symbols_find`, `tokenopt_symbol_packet`, `tokenopt_test_neighbors`, or `tokenopt_failure_packet` if coverage is missing. |
 | Refactor, migration, implementation planning | MCP-first strict, shell off | Usually yes | `refactor_scope`: `-74.4%` total tokens, same average quality `0.938` | Use TokenOpt for impact scope unless the owning file/class is already known. |
 | Unit-test planning or unknown owning test area | MCP-first strict, shell off | Yes for planning | `exact_symbol`: `-61.4%` total tokens, quality improved from `0.750` to `1.000` | For planning, TokenOpt is useful. For writing tests against a known class, use narrow reads directly. |
 | Review with a concrete diff or patch | Review evidence route | Yes if diff is present | Not separately isolated in this run | Give the actual diff. TokenOpt can compile review-shaped evidence. |
@@ -158,6 +159,11 @@ If this is a broad repo/business/planning task and ContextGate MCP is available,
 - If answerable=true, answer from the packet and do not call shell/search/read again for the same evidence.
 - If answerable=false, use only its allowed TokenOpt followups.
 
+If this is an implementation, unit-test, fix, or debug task and TokenOpt full-mode coding tools are available:
+- Call tokenopt_compile_evidence once.
+- Treat answerable=true as valid only when coding coverage includes exact target symbol, signature/definition slice, dependencies/usages, test neighbor/style, build/test command, and failure context when relevant.
+- If answerable=false, use only the allowed coding followups.
+
 If this is an exact code-flow/class/method/PBI task that needs line-level proof, do not call ContextGate first. Use narrow search/read directly.
 
 Never do ContextGate first and then repeat the same exploration with shell, search, or read.
@@ -179,6 +185,7 @@ Task:
 | Benchmarking TokenOpt | Yes | `Use TokenOpt as the first acquisition path for this benchmark.` |
 | Copilot does not call MCP naturally | Yes | `Use the tokenopt-cost-gate agent if available.` |
 | Exact flow/class/method trace | Usually no | Use narrow search/read directly. |
+| Unknown-owner implementation, unit-test, fix, or failure task | Yes in full mode | Use ContextGate coding coverage once, then only allowed coding followups. |
 | Known file/module implementation | Usually no | Start from the known file/module and run narrow validation. |
 | Review current diff | Usually no | Use diff context first; use narrow search/read only for unclear impact. |
 
@@ -190,7 +197,7 @@ Bypass ContextGate when exact code structure is already the task:
 - Call flow or dependency impact around a known symbol.
 - API/service/domain flow with line-level proof.
 - Impact analysis from a specific symbol or field.
-- Implementation where the owning code path is unknown.
+- Implementation where the owning file/symbol is already known.
 
 Use native narrow search/read with bounded queries for those cases. Do not run a second exploration path after ContextGate already returned `answerable=true`.
 
@@ -340,8 +347,9 @@ Use this for actual code changes. Do not force TokenOpt first if the owning file
 This is an implementation task.
 
 Choose the cheapest evidence path first:
-- If the owning area is unknown, use ContextGate once for broad ownership discovery, or narrow search/read when likely terms are known.
-- Use TokenOpt only if broad planning is needed before finding ownership.
+- If the owning area is unknown and TokenOpt full-mode coding tools are available, use ContextGate coding coverage once.
+- If the owning file/module is known, use narrow search/read and targeted validation directly.
+- Do not accept answerable=true for coding work unless the packet covers exact target symbol, definition/signature, dependencies/usages, test neighbor/style, and build/test command.
 - Do not use ContextGate first and then repeat the same evidence acquisition with shell/search/read.
 
 Task:
@@ -370,6 +378,8 @@ This is a specific test-writing task.
 Do not call TokenOpt first if the target class/module is known.
 Use narrow search/read to find the class, related tests, and existing test style.
 Avoid broad scans and full-suite tests.
+
+If the target class/module is unknown and TokenOpt full-mode coding tools are available, use ContextGate coding coverage once and follow only its allowed coding followups.
 
 Task:
 Write unit tests for <class/module/function>.
