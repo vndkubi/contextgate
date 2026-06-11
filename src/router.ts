@@ -7,6 +7,14 @@ export interface RouteTaskInput {
 }
 
 const SMALL_REPO_FILE_LIMIT = 250;
+const GENERIC_SYMBOL_SIGNALS = new Set([
+  "Benchmark",
+  "JSON",
+  "Project",
+  "Repository",
+  "Router",
+  "TokenOpt"
+]);
 
 export function routeTask(input: RouteTaskInput): RouteDecision {
   const task = input.task.trim();
@@ -16,6 +24,23 @@ export function routeTask(input: RouteTaskInput): RouteDecision {
   const hasExactSymbolTarget = signals.some((signal) => signal.startsWith("symbol:"));
   const hasExactTarget = hasExactFileTarget || hasExactSymbolTarget;
   const requestedTaskType = input.requestedTaskType && input.requestedTaskType !== "unknown" ? input.requestedTaskType : undefined;
+  const missingArtifactReason = getMissingArtifactReason(task, prompt, signals);
+
+  if (isSecurityAuditPrompt(prompt)) {
+    return decision("security_audit", "review_diff", "security", "compile", [
+      missingArtifactReason ?? "Prompt is security-audit oriented; require explicit security coverage before answerability.",
+      ...(missingArtifactReason ? ["artifact:missing"] : []),
+      ...signals
+    ]);
+  }
+
+  if (missingArtifactReason) {
+    return decision("needs_input_bypass", missingArtifactTaskType(task, prompt, requestedTaskType), "bypass", "bypass", [
+      missingArtifactReason,
+      "artifact:missing",
+      ...signals
+    ]);
+  }
 
   if ((input.repoFileCount ?? Number.MAX_SAFE_INTEGER) < SMALL_REPO_FILE_LIMIT && hasExactFileTarget && !isReviewPrompt(prompt)) {
     return decision("small_repo_bypass", requestedTaskType ?? "field_impact", "bypass", "bypass", [
@@ -94,7 +119,13 @@ function decision(
   action: RouteDecision["action"],
   reasons: string[]
 ): RouteDecision {
-  const confidence = taskClass === "broad_flow" ? 0.72 : taskClass === "small_repo_bypass" ? 0.88 : taskClass === "coding_coverage" ? 0.84 : 0.82;
+  const confidence = taskClass === "broad_flow"
+    ? 0.72
+    : taskClass === "small_repo_bypass" || taskClass === "needs_input_bypass"
+      ? 0.88
+      : taskClass === "coding_coverage"
+        ? 0.84
+        : 0.82;
   return {
     taskClass,
     taskType,
@@ -103,8 +134,82 @@ function decision(
     reason: reasons[0] ?? "Route selected by prompt heuristics.",
     confidence,
     promptSignals: reasons.slice(1, 12),
-    negativeControl: taskClass === "small_repo_bypass" || taskClass === "exact_symbol"
+    negativeControl: taskClass === "small_repo_bypass" || taskClass === "exact_symbol" || taskClass === "needs_input_bypass"
   };
+}
+
+function getMissingArtifactReason(task: string, prompt: string, signals: string[]): string | undefined {
+  if (hasConcreteArtifact(task, signals)) {
+    return undefined;
+  }
+  if (isPromoteReviewMemoryPrompt(prompt)) {
+    return "Prompt asks to promote review memory but no completed-task summary, transcript, diff, or review evidence was provided.";
+  }
+  if (isUnitTestPlanningPrompt(prompt)) {
+    return "Prompt asks for a unit-test plan but no target class, module, file, behavior, or failing case was provided.";
+  }
+  if (isPbiOrRequirementPlanPrompt(prompt)) {
+    return "Prompt asks for a PBI/requirement implementation plan but no concrete PBI, requirement body, issue, or acceptance criteria was provided.";
+  }
+  if (isRequirementAnalysisPrompt(prompt)) {
+    return "Prompt asks to analyze a requirement but no requirement text, ticket, or acceptance criteria was provided.";
+  }
+  if (isReviewPrompt(prompt)) {
+    return "Prompt asks for review but no concrete diff, changed file list, PR, symbol, or risky surface was provided.";
+  }
+  return undefined;
+}
+
+function hasConcreteArtifact(task: string, signals: string[]): boolean {
+  if (signals.some((signal) => signal.startsWith("file:") || signal.startsWith("symbol:") || signal === "diff:inline")) {
+    return true;
+  }
+  return /https?:\/\/\S+/i.test(task) ||
+    /\b(?:PBI|PB|REQ|ISSUE|BUG|TASK|JIRA|GH|PR)[-_]?\d+\b/i.test(task) ||
+    /#\d{2,}\b/.test(task) ||
+    /\b(?:requirement|pbi|acceptance criteria|completed task|task summary|transcript|diff|changed files?|risky surface|behavior)\s*:\s*\S.{20,}/is.test(task) ||
+    /```[\s\S]{20,}```/.test(task) ||
+    /[`"'][^`"']{20,}[`"']/.test(task);
+}
+
+function missingArtifactTaskType(task: string, prompt: string, requestedTaskType?: EvidenceTaskType): EvidenceTaskType {
+  if (requestedTaskType) {
+    return requestedTaskType;
+  }
+  if (isUnitTestPlanningPrompt(prompt)) {
+    return "write_unittest";
+  }
+  if (isPbiOrRequirementPlanPrompt(prompt)) {
+    return "implement";
+  }
+  if (isReviewPrompt(prompt)) {
+    return "review_diff";
+  }
+  if (/\b(build|handoff|onboard)\b/i.test(task)) {
+    return "build_handoff";
+  }
+  return "investigate";
+}
+
+function isSecurityAuditPrompt(prompt: string): boolean {
+  return /\b(security|vulnerab|exploit|authn|authz|authorization|authentication|permission|secret|csrf|xss|sql injection|deseriali[sz]ation)\b/i.test(prompt) &&
+    /\b(review|audit|findings?|risky surfaces?|changed behavior)\b/i.test(prompt);
+}
+
+function isPromoteReviewMemoryPrompt(prompt: string): boolean {
+  return /\b(promote|promotion)\b/i.test(prompt) && /\b(review memory|memory)\b/i.test(prompt);
+}
+
+function isUnitTestPlanningPrompt(prompt: string): boolean {
+  return /\b(unit tests?|unittest|write tests?|add tests?|test plan|test strategy)\b/i.test(prompt);
+}
+
+function isPbiOrRequirementPlanPrompt(prompt: string): boolean {
+  return /\b(?:pbi|requirement)\b/i.test(prompt) && /\b(?:implementation plan|implement|preserving compatibility|compatibility)\b/i.test(prompt);
+}
+
+function isRequirementAnalysisPrompt(prompt: string): boolean {
+  return /\banaly[sz]e\b/i.test(prompt) && /\brequirement\b/i.test(prompt);
 }
 
 function isCodingCoveragePrompt(task: string, requestedTaskType?: EvidenceTaskType): boolean {
@@ -131,6 +236,9 @@ function collectPromptSignals(task: string): string[] {
   }
   for (const match of task.matchAll(/\b[A-Z][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?\b/g)) {
     const symbol = match[0];
+    if (GENERIC_SYMBOL_SIGNALS.has(symbol)) {
+      continue;
+    }
     if (symbol.includes(".") || /(?:Service|Controller|Repository|Gateway|Manager|Client|Factory|Handler|Config|Test|Exception|Error)$/.test(symbol)) {
       signals.push(`symbol:${symbol}`);
     }

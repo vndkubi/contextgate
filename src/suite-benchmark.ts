@@ -2,6 +2,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
+import { routeTask } from "./router.js";
+import type { EvidenceTaskType } from "./types.js";
 
 type SuiteBenchmarkMode = "baseline" | "mcp-first" | "mcp-only" | "compiled-hard-gate" | "router-strict" | "router-best";
 
@@ -482,15 +484,39 @@ function buildSuitePrompt(repo: string, task: SuiteTask, mode: SuiteBenchmarkMod
   }
   if (mode === "router-best") {
     const deterministicReview = hasDeterministicReviewSupport(task);
+    const route = routeTask({ task: task.prompt, requestedTaskType: taskType });
+    if (route.taskClass === "needs_input_bypass") {
+      const useMcpPacket = shouldUseMcpForMissingArtifact(task);
+      return [
+        ...common,
+        "- TokenOpt router selected missing-artifact bypass for this task.",
+        `- Router plan: ${route.reason}`,
+        useMcpPacket
+          ? `- Call tokenopt_compile_evidence with cwd=${repo}, task_type=${taskType}, and budget_tokens around ${packetTokens}; do not use any followup tools.`
+          : "- Do not call tokenopt_compile_evidence; the router already has enough information to know the required artifact is missing.",
+        "- Do not call shell; it is disabled because no concrete artifact was provided.",
+        "- Preserve the requested JSON contract. Return a bounded answer that explicitly asks for the missing artifact and does not invent repo-specific evidence."
+      ].join("\n");
+    }
+    if (route.taskClass === "security_audit") {
+      return [
+        ...common,
+        "- TokenOpt router selected security-audit coverage for this task.",
+        `- Router plan: ${route.reason}`,
+        `- Call tokenopt_compile_evidence with cwd=${repo}, task_type=review_diff, and budget_tokens around ${packetTokens}.`,
+        "- Do not call shell; security findings require concrete diff/scope coverage first.",
+        "- If the packet recommends ask_user, return JSON that states the missing scope and does not invent findings."
+      ].join("\n");
+    }
     const routerPlan =
       taskType === "review_diff" && !deterministicReview
-        ? "review_diff without a concrete supported diff -> skip MCP-first and use bounded targeted shell fallback for exact changed symbols, files, and tests."
+        ? "review_diff without a concrete supported diff -> ask for the diff/scope instead of shell exploration."
         : taskType === "review_diff"
           ? "supported review_diff -> call tokenopt_compile_evidence first; if answerable=true, answer from the packet with zero followups."
           : `${taskType} -> shell disabled; use tokenopt_compile_evidence first, then exact TokenOpt search/read followups only for missing named files, routes, symbols, or tests.`;
     const shellPolicy =
       taskType === "review_diff" && !deterministicReview
-        ? "- Bounded shell fallback is allowed; do not add MCP-first when TokenOpt cannot prove the review from the packet."
+        ? "- Do not call shell; ask for a concrete diff, changed files, PR, or target before review exploration."
         : "- Do not call shell; it is disabled in this benchmark mode for this task.";
     return [
       ...common,
@@ -498,7 +524,7 @@ function buildSuitePrompt(repo: string, task: SuiteTask, mode: SuiteBenchmarkMod
       `- Router plan: ${routerPlan}`,
       deterministicReview || taskType !== "review_diff"
         ? `- Call tokenopt_compile_evidence with cwd=${repo}, task_type=${taskType}, and budget_tokens around ${packetTokens}.`
-        : "- Do not call tokenopt_compile_evidence for this task; avoid MCP+shell double-spend.",
+        : `- Call tokenopt_compile_evidence with cwd=${repo}, task_type=${taskType}, and budget_tokens around ${packetTokens}.`,
       shellPolicy,
       "- Preserve the requested JSON contract. Include unresolved risks when evidence is incomplete."
     ].join("\n");
@@ -522,7 +548,7 @@ function buildSuitePrompt(repo: string, task: SuiteTask, mode: SuiteBenchmarkMod
   ].join("\n");
 }
 
-function inferTaskType(task: SuiteTask): string {
+function inferTaskType(task: SuiteTask): EvidenceTaskType {
   const idAndClass = `${task.id} ${task.class}`.toLowerCase();
   const text = `${idAndClass} ${task.prompt}`.toLowerCase();
   if (idAndClass.includes("field") || idAndClass.includes("impact")) {
@@ -1052,6 +1078,10 @@ function shouldDisableShell(mode: SuiteBenchmarkMode, task: SuiteTask): boolean 
     return false;
   }
   const taskType = inferTaskType(task);
+  const route = routeTask({ task: task.prompt, requestedTaskType: taskType });
+  if (route.taskClass === "needs_input_bypass" || route.taskClass === "security_audit") {
+    return true;
+  }
   return taskType !== "review_diff" || hasDeterministicReviewSupport(task);
 }
 
@@ -1062,4 +1092,10 @@ function hasDeterministicReviewSupport(task: SuiteTask): boolean {
     /withApplicationTags\s*\(\s*applicationTags\s*\)/.test(text) &&
     /withApplicationTags\s*\(\s*(?:java\.util\.)?Collections\.emptySet\s*\(\s*\)\s*\)/.test(text)
   );
+}
+
+function shouldUseMcpForMissingArtifact(task: SuiteTask): boolean {
+  return /\bPBI\/requirement\b/i.test(task.prompt) ||
+    /\bunit-test plan\b/i.test(task.prompt) ||
+    /\bJakarta EE Java PR diff\b/i.test(task.prompt);
 }

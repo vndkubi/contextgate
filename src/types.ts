@@ -14,12 +14,14 @@ export type AnswerabilityGateMode = "hard" | "shadow" | "off";
 export type TaskClass =
   | "broad_flow"
   | "review_diff"
+  | "security_audit"
   | "debug_runtime"
   | "refactor_scope"
   | "coding_coverage"
   | "exact_symbol"
-  | "small_repo_bypass";
-export type ToolProfile = "explore" | "review" | "debug" | "refactor" | "coding" | "exact" | "bypass";
+  | "small_repo_bypass"
+  | "needs_input_bypass";
+export type ToolProfile = "explore" | "review" | "security" | "debug" | "refactor" | "coding" | "exact" | "bypass";
 export type EvidenceTaskType =
   | "api_flow"
   | "field_impact"

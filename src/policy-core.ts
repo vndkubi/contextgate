@@ -73,7 +73,7 @@ function evaluatePrompt(event: TokenOptEvent, config: TokenOptConfig): PolicyDec
 
   const route = routeTask({ task: prompt });
   const outputGuidance =
-    route.taskClass === "review_diff" || route.taskClass === "refactor_scope"
+    route.taskClass === "review_diff" || route.taskClass === "security_audit" || route.taskClass === "refactor_scope"
       ? " For code changes, prefer unified diffs or compact edit plans; avoid full-file rewrites unless creating a new file."
       : "";
   const context = config.codegraph.enabled

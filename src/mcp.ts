@@ -523,13 +523,42 @@ function compileEvidenceTool(args: Record<string, unknown>, mcpMode: McpMode = "
   const qualityRubric = optionalStringArray(args, "quality_rubric").slice(0, 12);
   const detail = normalizeEvidenceDetail(optionalString(args, "detail"));
   const includeStructuredPacket = optionalBoolean(args, "include_structured_packet") ?? false;
+  const earlyRoute = routeTask({
+    task,
+    requestedTaskType
+  });
+  const earlyTaskType = optionalString(args, "task_type") && requestedTaskType !== "unknown" ? requestedTaskType : earlyRoute.taskType;
+  if (earlyRoute.taskClass === "needs_input_bypass") {
+    return compileMissingArtifactPacket({
+      loaded,
+      task,
+      taskType: earlyTaskType,
+      route: earlyRoute,
+      budgetTokens,
+      qualityRubric,
+      detail,
+      includeStructuredPacket
+    });
+  }
+  if (earlyRoute.taskClass === "security_audit") {
+    return compileSecurityAuditPacket({
+      loaded,
+      task,
+      taskType: earlyTaskType,
+      route: earlyRoute,
+      budgetTokens,
+      qualityRubric,
+      detail,
+      includeStructuredPacket
+    });
+  }
   const inventory = buildRepoInventory(loaded.repoRoot, loaded.config, loaded.repoRoot);
   const route = routeTask({
     task,
     repoFileCount: inventory.totalFiles,
     requestedTaskType
   });
-  const taskType = optionalString(args, "task_type") ? requestedTaskType : route.taskType;
+  const taskType = optionalString(args, "task_type") && requestedTaskType !== "unknown" ? requestedTaskType : route.taskType;
   const facts = extractProjectFacts(loaded.repoRoot);
   const factFiles = factSourceFiles(facts);
   const hasBuildFacts = facts.some((fact) => fact.startsWith("build_tool="));
@@ -644,9 +673,10 @@ function compileEvidenceTool(args: Record<string, unknown>, mcpMode: McpMode = "
             max_output_tokens: 900
           }
         ];
+  const cappedAllowedFollowups = capAllowedFollowups(allowedFollowups, route, taskType);
   const answerContract = buildAnswerContract(taskType, task, qualityRubric, answerable);
   const packetId = crypto.randomUUID();
-  const coverageCertificate = buildCoverageCertificate(packetId, route, answerable, taskSpecific?.confidence ?? (answerable ? 0.86 : 0.48), coverage, missing, allowedFollowups);
+  const coverageCertificate = buildCoverageCertificate(packetId, route, answerable, taskSpecific?.confidence ?? (answerable ? 0.86 : 0.48), coverage, missing, cappedAllowedFollowups);
   const outputPolicy = buildOutputPolicy(route, taskType);
   const packet: EvidencePacket = {
     packet_id: packetId,
@@ -662,7 +692,7 @@ function compileEvidenceTool(args: Record<string, unknown>, mcpMode: McpMode = "
     evidence,
     missing,
     answer_contract: answerContract,
-    allowed_followups: allowedFollowups,
+    allowed_followups: cappedAllowedFollowups,
     disallowed_followups: answerable
       ? [
           "tokenopt_search",
@@ -677,7 +707,7 @@ function compileEvidenceTool(args: Record<string, unknown>, mcpMode: McpMode = "
         ]
       : ["repo_wide_rg_files", "full_file_reads", "full_suite_tests_without_target"],
     recommended_next_action: answerable ? "answer_now" : "expand_exact",
-    max_additional_calls: answerable ? 0 : 3,
+    max_additional_calls: maxAdditionalCallsForPacket(answerable, route, taskType, cappedAllowedFollowups),
     token_budget: {
       budget_tokens: budgetTokens,
       evidence_tokens_est: evidence.reduce((total, item) => total + (item.tokens_est ?? estimateTokens(JSON.stringify(item))), 0),
@@ -704,6 +734,255 @@ function compileEvidenceTool(args: Record<string, unknown>, mcpMode: McpMode = "
   });
 
   return textResult(formatEvidencePacket(packet, statePath, detail), false, buildEvidenceStructuredContent(packet, statePath, includeStructuredPacket));
+}
+
+interface EarlyEvidencePacketInput {
+  loaded: LoadedConfig;
+  task: string;
+  taskType: EvidenceTaskType;
+  route: RouteDecision;
+  budgetTokens: number;
+  qualityRubric: string[];
+  detail: EvidenceDetail;
+  includeStructuredPacket: boolean;
+}
+
+function compileMissingArtifactPacket(input: EarlyEvidencePacketInput) {
+  const coverage: Record<string, EvidenceCoverageStatus> = {
+    prompt_classified: "covered",
+    concrete_artifact: "missing",
+    repo_evidence_needed: "missing"
+  };
+  const missing = [
+    input.route.reason,
+    "Provide the concrete PBI, requirement text, diff, file/symbol target, completed-task summary, or acceptance criteria before TokenOpt can compile grounded repository evidence."
+  ];
+  return writeEarlyEvidencePacket({
+    ...input,
+    answerable: false,
+    confidence: 0.88,
+    coverage,
+    missing,
+    evidence: [
+      {
+        id: "E1",
+        claim: "TokenOpt detected a missing required artifact and skipped repository inventory to avoid speculative exploration.",
+        facts: [`route=${input.route.taskClass}`, `reason=${input.route.reason}`, "repo_inventory=skipped"],
+        tokens_est: 70
+      }
+    ],
+    allowedFollowups: [],
+    recommendedNextAction: "ask_user",
+    maxAdditionalCalls: 0,
+    disallowedFollowups: [
+      "repo_wide_rg_files",
+      "full_file_reads",
+      "raw_shell_search",
+      "shell_fallback_without_concrete_artifact",
+      "mcp_followups_without_concrete_artifact"
+    ],
+    eventReason: "missing-artifact-bypass"
+  });
+}
+
+function compileSecurityAuditPacket(input: EarlyEvidencePacketInput) {
+  const coverage = buildSecurityAuditCoverage(input.task, input.route);
+  const required = [
+    "target_or_diff_known",
+    "changed_files_or_scope_seen",
+    "input_boundaries_checked",
+    "auth_authz_checked",
+    "validation_or_deserialization_checked",
+    "secret_config_dependency_checked",
+    "test_or_guardrail_context_seen"
+  ];
+  const missing = required
+    .filter((dimension) => coverage[dimension] !== "covered")
+    .map((dimension) => `Security coverage missing: ${dimension}=${coverage[dimension] ?? "missing"}.`);
+  const hasScope = coverage.target_or_diff_known === "covered" && coverage.changed_files_or_scope_seen === "covered";
+  const allowedFollowups: EvidenceFollowup[] = hasScope
+    ? [
+        {
+          tool: "tokenopt_search",
+          reason: "Search only for the exact security-relevant target, changed symbol, route, config key, or guardrail named by the task.",
+          args: { pattern: "<security-target>", path: "<narrow-path>" },
+          max_output_tokens: 700
+        },
+        {
+          tool: "tokenopt_read_file",
+          reason: "Read bounded slices around the exact security boundary, validation logic, auth/authz check, or test guardrail.",
+          args: { path: "<matched-file>", startLine: 1, maxLines: 160 },
+          max_output_tokens: 1000
+        }
+      ]
+    : [];
+  const packetMissing = missing.length > 0
+    ? [
+        ...missing,
+        hasScope
+          ? "Use exact security followups only; do not broaden into repo-wide review exploration."
+          : "Provide a concrete diff, changed file list, PR, route, symbol, or risky surface before producing security findings."
+      ]
+    : [
+        "Security audit scope is named, but TokenOpt still requires exact repository evidence before final findings.",
+        "Use exact security followups only; do not broaden into repo-wide review exploration."
+      ];
+
+  return writeEarlyEvidencePacket({
+    ...input,
+    answerable: false,
+    confidence: hasScope ? 0.56 : 0.42,
+    coverage,
+    missing: packetMissing,
+    evidence: [
+      {
+        id: "E1",
+        claim: "TokenOpt classified this as a security audit and required security-specific coverage before answerability.",
+        facts: [
+          `route=${input.route.taskClass}`,
+          `coverage=${Object.entries(coverage).map(([key, value]) => `${key}:${value}`).join(",")}`,
+          "repo_inventory=skipped"
+        ],
+        tokens_est: 110
+      }
+    ],
+    allowedFollowups,
+    recommendedNextAction: hasScope ? "expand_exact" : "ask_user",
+    maxAdditionalCalls: allowedFollowups.length,
+    disallowedFollowups: [
+      "repo_wide_rg_files",
+      "full_file_reads",
+      "full_suite_tests_without_target",
+      "broad_shell_review_fallback",
+      "security_findings_without_scope_evidence"
+    ],
+    eventReason: hasScope ? "security-needs-exact-followup" : "security-needs-scope"
+  });
+}
+
+function writeEarlyEvidencePacket(input: EarlyEvidencePacketInput & {
+  answerable: boolean;
+  confidence: number;
+  coverage: Record<string, EvidenceCoverageStatus>;
+  missing: string[];
+  evidence: EvidenceItem[];
+  allowedFollowups: EvidenceFollowup[];
+  recommendedNextAction: EvidencePacket["recommended_next_action"];
+  maxAdditionalCalls: number;
+  disallowedFollowups: string[];
+  eventReason: string;
+}) {
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + 10 * 60 * 1000);
+  const packetId = crypto.randomUUID();
+  const answerContract = buildAnswerContract(input.taskType, input.task, input.qualityRubric, input.answerable);
+  const coverageCertificate = buildCoverageCertificate(packetId, input.route, input.answerable, input.confidence, input.coverage, input.missing, input.allowedFollowups);
+  const outputPolicy = buildOutputPolicy(input.route, input.taskType);
+  const packet: EvidencePacket = {
+    packet_id: packetId,
+    task: input.task,
+    task_type: input.taskType,
+    route: input.route,
+    repo_root: input.loaded.repoRoot,
+    answerable: input.answerable,
+    confidence: input.confidence,
+    coverage: input.coverage,
+    coverage_certificate: coverageCertificate,
+    output_policy: outputPolicy,
+    evidence: input.evidence,
+    missing: input.answerable ? [] : input.missing,
+    answer_contract: answerContract,
+    allowed_followups: input.answerable ? [] : input.allowedFollowups,
+    disallowed_followups: input.answerable
+      ? [
+          "tokenopt_search",
+          "tokenopt_read_file",
+          "tokenopt_project_facts",
+          "tokenopt_run_command",
+          "shell_rg",
+          "shell_grep",
+          "shell_git_grep",
+          "shell_findstr",
+          "raw_shell_search"
+        ]
+      : input.disallowedFollowups,
+    recommended_next_action: input.recommendedNextAction,
+    max_additional_calls: input.maxAdditionalCalls,
+    token_budget: {
+      budget_tokens: input.budgetTokens,
+      evidence_tokens_est: input.evidence.reduce((total, item) => total + (item.tokens_est ?? estimateTokens(JSON.stringify(item))), 0),
+      response_tokens_est: input.answerable ? Math.min(900, Math.max(300, Math.floor(input.budgetTokens * 0.45))) : 220
+    },
+    created_at: now.toISOString(),
+    expires_at: expiresAt.toISOString()
+  };
+
+  const statePath = writeEvidenceTaskState(input.loaded.config, input.loaded.repoRoot, packet);
+  appendEvent(input.loaded.config, {
+    timestamp: now.toISOString(),
+    source: "mcp",
+    eventName: "compile-evidence",
+    repoRoot: input.loaded.repoRoot,
+    action: "evidence",
+    reason: input.eventReason,
+    metadata: {
+      packetId: packet.packet_id,
+      taskType: input.taskType,
+      statePath,
+      evidenceTokens: packet.token_budget.evidence_tokens_est
+    }
+  });
+
+  return textResult(formatEvidencePacket(packet, statePath, input.detail), false, buildEvidenceStructuredContent(packet, statePath, input.includeStructuredPacket));
+}
+
+function buildSecurityAuditCoverage(task: string, route: RouteDecision): Record<string, EvidenceCoverageStatus> {
+  const hasMissingArtifact = route.promptSignals.includes("artifact:missing");
+  const hasInlineDiff = /^diff --git\b/m.test(task) || /^@@\s/m.test(task);
+  const hasFileOrSymbol = route.promptSignals.some((signal) => signal.startsWith("file:") || signal.startsWith("symbol:"));
+  const hasExplicitScope = !hasMissingArtifact && (hasInlineDiff || hasFileOrSymbol || /\b(?:risky surface|changed files?|route|endpoint|controller|service|config|dependency|auth|permission)\s*:\s*\S.{8,}/i.test(task));
+  return {
+    security_task_classified: "covered",
+    target_or_diff_known: hasExplicitScope ? "covered" : "missing",
+    changed_files_or_scope_seen: hasExplicitScope ? "covered" : "missing",
+    input_boundaries_checked: /\b(input|request|payload|parameter|param|form|endpoint|controller|api|boundary)\b/i.test(task) ? "covered" : "missing",
+    auth_authz_checked: /\b(auth|authorization|authentication|permission|role|tenant|access control)\b/i.test(task) ? "covered" : "missing",
+    validation_or_deserialization_checked: /\b(validat|sanitize|deserialize|deserialization|schema|parser|csrf|xss|sql injection)\b/i.test(task) ? "covered" : "missing",
+    secret_config_dependency_checked: /\b(secret|credential|token|config|dependency|version|supply chain|env)\b/i.test(task) ? "covered" : "missing",
+    test_or_guardrail_context_seen: /\b(test|guardrail|assert|regression|policy)\b/i.test(task) ? "covered" : "missing"
+  };
+}
+
+function capAllowedFollowups(followups: EvidenceFollowup[], route: RouteDecision, taskType: EvidenceTaskType): EvidenceFollowup[] {
+  if (route.taskClass === "coding_coverage" && taskType === "write_unittest") {
+    const symbolPacket = followups.find((followup) => followup.tool === "tokenopt_symbol_packet");
+    return (symbolPacket ? [symbolPacket] : followups).slice(0, 1);
+  }
+  if (route.taskClass === "review_diff") {
+    return followups.slice(0, 2);
+  }
+  return followups;
+}
+
+function maxAdditionalCallsForPacket(
+  answerable: boolean,
+  route: RouteDecision,
+  taskType: EvidenceTaskType,
+  followups: EvidenceFollowup[]
+): number {
+  if (answerable) {
+    return 0;
+  }
+  if (route.taskClass === "needs_input_bypass") {
+    return 0;
+  }
+  if (route.taskClass === "coding_coverage" && taskType === "write_unittest") {
+    return Math.min(1, followups.length);
+  }
+  if (route.taskClass === "review_diff") {
+    return Math.min(2, followups.length);
+  }
+  return Math.min(3, followups.length || 3);
 }
 
 async function runCommandTool(args: Record<string, unknown>) {
@@ -1695,17 +1974,17 @@ function buildCoverageCertificate(
     dimensions: coverage,
     missing,
     followup_exact_tools_allowed: allowedFollowups.map((followup) => followup.tool),
-    deny_broad_exploration: answerable && missing.length === 0
+    deny_broad_exploration: (answerable && missing.length === 0) || route.taskClass === "needs_input_bypass" || route.taskClass === "security_audit"
   };
 }
 
 function buildOutputPolicy(route: RouteDecision, taskType: EvidenceTaskType): OutputPolicy {
-  if (route.taskClass === "review_diff") {
+  if (route.taskClass === "review_diff" || route.taskClass === "security_audit") {
     return {
       preferred_format: "compact_edit_plan",
       avoid_full_file_rewrite: true,
       include_explanation_max_tokens: 300,
-      applies_to: ["review", "suggested_fix", "patch"]
+      applies_to: route.taskClass === "security_audit" ? ["security_review", "findings", "risk_triage"] : ["review", "suggested_fix", "patch"]
     };
   }
   if (route.taskClass === "refactor_scope" || taskType === "implement") {
@@ -2899,6 +3178,7 @@ function sanitizeTaskPrompt(value: string): string {
   }
 
   const markers = [
+    "Benchmark constraints:",
     "Project instruction injected by TokenOpt setup:",
     "The user may ask naturally and does not need to name MCP tools.",
     "When TokenOpt MCP tools are available",

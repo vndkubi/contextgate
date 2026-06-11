@@ -11,7 +11,13 @@ import { evaluatePolicy } from "../dist/policy-core.js";
 import { routeTask } from "../dist/router.js";
 
 test("router classifies review, debug, refactor, exact, and small-repo bypass tasks", () => {
-  assert.equal(routeTask({ task: "Review this PR diff for changed files" }).taskClass, "review_diff");
+  assert.equal(routeTask({ task: "Review this PR diff for changed files" }).taskClass, "needs_input_bypass");
+  assert.equal(routeTask({ task: "Review this diff:\ndiff --git a/src/orders/OrderService.ts b/src/orders/OrderService.ts" }).taskClass, "review_diff");
+  assert.equal(routeTask({ task: "Perform a security-focused review of changed behavior or risky surfaces. Return JSON findings." }).taskClass, "security_audit");
+  assert.equal(routeTask({ task: "Create an implementation plan for a small PBI/requirement while preserving compatibility. Return JSON." }).taskClass, "needs_input_bypass");
+  assert.equal(routeTask({ task: "Analyze a requirement and produce WHAT, WHY, HOW, acceptance criteria, impacted areas, tests, and unknowns. Return JSON." }).taskClass, "needs_input_bypass");
+  assert.equal(routeTask({ task: "Write a unit-test plan for the likely owning class/module of a behavior. Return JSON." }).taskClass, "needs_input_bypass");
+  assert.equal(routeTask({ task: "Identify what should be promoted into review memory after a completed task. Return JSON." }).taskClass, "needs_input_bypass");
   assert.equal(routeTask({ task: "Debug this Spring stack trace Caused by NullPointerException" }).taskClass, "coding_coverage");
   assert.equal(routeTask({ task: "Implement validation in OrderService" }).taskClass, "coding_coverage");
   assert.equal(routeTask({ task: "Write unit tests for OrderService" }).taskClass, "coding_coverage");

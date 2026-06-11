@@ -166,9 +166,76 @@ test("mcp compile evidence uses coding coverage for unit-test tasks", async () =
       assert.match(packet.content[0].text, /tokenopt_symbol_packet/);
       assert.equal(packet.structuredContent.packetSummary.route.taskClass, "coding_coverage");
       assert.equal(packet.structuredContent.packetSummary.answerable, false);
+      assert.equal(packet.structuredContent.packetSummary.max_additional_calls <= 1, true);
+      assert.equal(packet.structuredContent.packetSummary.allowed_followups.length <= 1, true);
       assert.equal(packet.structuredContent.packetSummary.allowed_followups.some((followup) => followup.tool === "tokenopt_symbol_packet"), true);
     },
     { cwd: repo, env: { TOKENOPT_MCP_MODE: "full" } }
+  );
+});
+
+test("mcp compile evidence bypasses missing-artifact tasks before repo inventory", async () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "tokenopt-missing-artifact-repo-"));
+  fs.writeFileSync(path.join(repo, "package.json"), JSON.stringify({ name: "missing-artifact-fixture" }, null, 2));
+
+  await withTokenOptMcp(
+    async (client) => {
+      const packet = await client.callTool({
+        name: "tokenopt_compile_evidence",
+        arguments: {
+          task: "Analyze a requirement and produce WHAT, WHY, HOW, acceptance criteria, impacted areas, tests, and unknowns. Return JSON.",
+          task_type: "unknown",
+          cwd: repo,
+          detail: "full",
+          include_structured_packet: true
+        }
+      });
+
+      assert.equal(packet.isError ?? false, false);
+      assert.match(packet.content[0].text, /route_decision: needs_input_bypass\/bypass\/bypass/);
+      assert.match(packet.content[0].text, /recommended_next_action: ask_user/);
+      assert.match(packet.content[0].text, /max_additional_calls: 0/);
+      assert.match(packet.content[0].text, /repo_inventory=skipped/);
+      assert.doesNotMatch(packet.content[0].text, /total_files=/);
+      assert.equal(packet.structuredContent.packetSummary.answerable, false);
+      assert.equal(packet.structuredContent.packetSummary.recommended_next_action, "ask_user");
+      assert.equal(packet.structuredContent.packetSummary.max_additional_calls, 0);
+      assert.equal(packet.structuredContent.packetSummary.route.taskClass, "needs_input_bypass");
+    },
+    { cwd: repo }
+  );
+});
+
+test("mcp compile evidence returns security coverage contract without scope", async () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "tokenopt-security-audit-repo-"));
+  fs.writeFileSync(path.join(repo, "package.json"), JSON.stringify({ name: "security-audit-fixture" }, null, 2));
+
+  await withTokenOptMcp(
+    async (client) => {
+      const packet = await client.callTool({
+        name: "tokenopt_compile_evidence",
+        arguments: {
+          task: "Perform a security-focused review of changed behavior or risky surfaces. Return JSON findings.",
+          task_type: "review_diff",
+          cwd: repo,
+          detail: "full",
+          include_structured_packet: true
+        }
+      });
+
+      assert.equal(packet.isError ?? false, false);
+      assert.match(packet.content[0].text, /route_decision: security_audit\/security\/compile/);
+      assert.match(packet.content[0].text, /answerable: false/);
+      assert.match(packet.content[0].text, /target_or_diff_known: missing/);
+      assert.match(packet.content[0].text, /auth_authz_checked: missing/);
+      assert.match(packet.content[0].text, /recommended_next_action: ask_user/);
+      assert.match(packet.content[0].text, /deny_broad_exploration: true/);
+      assert.equal(packet.structuredContent.packetSummary.route.taskClass, "security_audit");
+      assert.equal(packet.structuredContent.packetSummary.answerable, false);
+      assert.equal(packet.structuredContent.packetSummary.coverage_certificate.dimensions.target_or_diff_known, "missing");
+      assert.equal(packet.structuredContent.packetSummary.max_additional_calls, 0);
+    },
+    { cwd: repo }
   );
 });
 

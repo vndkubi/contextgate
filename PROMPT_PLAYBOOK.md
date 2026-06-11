@@ -116,11 +116,13 @@ This table summarizes the route behavior from the 37-prompt real Codex benchmark
 | --- | --- | --- | --- | --- |
 | Broad repo flow, onboarding, context inspection, dependency/build analysis | MCP-first strict, shell off | Yes | `broad_flow`: `-82.3%` total tokens, quality improved from `0.845` to `0.905` | Use `tokenopt_compile_evidence` once, then answer or use exact allowed followups. |
 | Runtime/debug/build failure/root cause | MCP-first strict, shell off | Yes | `debug_runtime`: `-78.1%` total tokens, quality improved from `0.778` to `0.944` | Use TokenOpt first to compress failure evidence and keep followups exact. |
-| Coding implementation/unit-test with unknown owner | Full-mode coding coverage | Yes if full-mode tools are available | New coverage layer; benchmark pending | Use `tokenopt_compile_evidence` once, then follow only `tokenopt_symbols_find`, `tokenopt_symbol_packet`, `tokenopt_test_neighbors`, or `tokenopt_failure_packet` if coverage is missing. |
+| Coding implementation/unit-test with concrete target | Full-mode coding coverage | Yes if full-mode tools are available | New coverage layer; benchmark pending | Use `tokenopt_compile_evidence` once, then follow only the capped coding followup if coverage is missing. |
+| PBI/requirement/unit-test/review-memory prompt missing its artifact | Missing-artifact bypass | Yes, as a cheap gate | New guardrail | Return bounded JSON asking for the missing artifact. Do not scan the repo. |
 | Refactor, migration, implementation planning | MCP-first strict, shell off | Usually yes | `refactor_scope`: `-74.4%` total tokens, same average quality `0.938` | Use TokenOpt for impact scope unless the owning file/class is already known. |
 | Unit-test planning or unknown owning test area | MCP-first strict, shell off | Yes for planning | `exact_symbol`: `-61.4%` total tokens, quality improved from `0.750` to `1.000` | For planning, TokenOpt is useful. For writing tests against a known class, use narrow reads directly. |
+| Security audit | Security coverage route | Yes, as a coverage gate | New guardrail | Require concrete scope and security dimensions before findings; otherwise ask for scope or exact followups only. |
 | Review with a concrete diff or patch | Review evidence route | Yes if diff is present | Not separately isolated in this run | Give the actual diff. TokenOpt can compile review-shaped evidence. |
-| Review without a concrete diff | Hybrid fallback, shell on | No | `review_diff`: `+65.8%` total tokens, quality improved to `1.000` but expensive | Do not force MCP-first. Ask for the diff or use normal review flow. |
+| Review without a concrete diff | Missing-artifact bypass | Yes, as a cheap gate | Previously expensive; now guarded | Ask for the diff, changed files, PR, or exact target. Do not use shell fallback. |
 | Small repo plus exact file/symbol | Bypass | No | Router marks this as negative control | Use native narrow read/search. |
 | Exact class/method/line-level flow trace | Native narrow search/read | Usually no | Hybrid double-spend risk | Use narrow search/read directly unless you need a broad context summary first. |
 | Simple non-repo question or tiny command | Bypass | No | Not a TokenOpt workload | Answer directly or run the tiny command. |
@@ -132,7 +134,7 @@ Aggregate from that benchmark:
 | `mcp-first-strict(shell-off)` | 28 | 23/28 | `-82.6%` total tokens | 4.1 | 0 |
 | `hybrid-review-fallback(shell-on)` | 9 | 9/9 | `+47.2%` total tokens | 0 | 39 |
 
-The main lesson is that strict MCP-first works when it replaces broad exploration. It loses when the agent pays both costs: TokenOpt or route setup plus broad shell fallback.
+The main lesson is that strict MCP-first works when it replaces broad exploration. It loses when the agent pays both costs: TokenOpt or route setup plus broad shell fallback. Current router guidance treats missing-artifact review and planning prompts as ask/bounded-answer cases instead of shell fallback cases.
 
 ## What The Agent Should Report
 
