@@ -52,12 +52,21 @@ tokenopt_search
 tokenopt_read_file
 ```
 
-The normal user prompt should stay natural. The setup instructions, not the user prompt, should contain the tool contract.
+The normal user prompt should stay natural. The setup instructions, not the user prompt, should contain the tool contract. For Copilot UI, `tokenopt setup copilot` also installs native prompt files under `.github/prompts`, so repeated tasks can be launched with slash prompts instead of copying playbook text.
 
 Good normal prompt after setup:
 
 ```text
 Investigate the primary learning/recall flow and return files, symbols, risks, and evidence.
+```
+
+Good Copilot slash prompts after setup:
+
+```text
+/write-unittest OrderService payment authorization
+/security-audit <diff or PR scope>
+/review-code <diff>
+/pbi-plan <requirement text or ticket URL>
 ```
 
 Good explicit smoke-test prompt:
@@ -76,7 +85,8 @@ Use the playbook prompts for day-to-day work. Use benchmark prompts only for mea
 
 | Prompt/source | Reuse in normal work? | Purpose | Notes |
 | --- | --- | --- | --- |
-| Standard Cost Router Prefix in this playbook | Yes | Production prompt policy | Keep it short and attach the real task. |
+| Native `.github/prompts/*.prompt.md` files | Yes | UI-native repeated tasks | Prefer slash prompts for common tasks so users do not copy this playbook. |
+| Standard Cost Router Prefix in this playbook | Fallback | Production prompt policy | Use only when repo instructions or prompt files are unavailable. |
 | Installed repo/agent instructions | Yes | Persistent routing setup | Put tool names and routing rules here, not in every user prompt. |
 | Explicit smoke-test prompt | Sometimes | Verify the agent sees TokenOpt MCP | Use only when checking setup or debugging routing. |
 | Benchmark suite prompt | No | A/B measurement and deterministic scoring | It includes constraints, repo paths, output contracts, and shell/MCP controls that can increase tokens in normal use. |

@@ -24,6 +24,11 @@ export interface InstructionGraphPlan {
   warnings: string[];
 }
 
+export interface NativePromptPackPlan {
+  files: InstructionGraphFile[];
+  totalEstimatedTokens: number;
+}
+
 export function auditInstructions(repoRoot: string): string {
   const files = findInstructionFiles(repoRoot);
   if (files.length === 0) {
@@ -75,6 +80,8 @@ export function emitTokenOptInstructions(target: InstructionTarget = "generic"):
       "- Investigate a broad failure surface before choosing exact files",
       "```",
       "",
+      "Native Copilot prompt files may also be installed under `.github/prompts`: `/pbi-plan`, `/requirement-analysis`, `/write-unittest`, `/security-audit`, `/review-code`, and `/promote-review-memory`.",
+      "",
       "Workflow:",
       "",
       "```text",
@@ -102,6 +109,17 @@ export function emitTokenOptInstructions(target: InstructionTarget = "generic"):
     "- Business/product/domain summary from docs/inventory",
     "- Implementation planning before editing",
     "- Unit-test planning before writing tests",
+    "```",
+    "",
+    "If `.github/prompts` is installed, users may call native Copilot prompt files such as `/pbi-plan`, `/requirement-analysis`, `/write-unittest`, `/security-audit`, `/review-code`, or `/promote-review-memory`. Treat those prompt files as normal user intent plus the routing rules in this instruction file.",
+    "",
+    "Quality-first routing guardrails:",
+    "",
+    "```text",
+    "- Missing artifact: if PBI/requirement/unit-test/review-memory/review prompts lack the concrete artifact, ask for it and do not inspect the repo.",
+    "- Security audit: require concrete diff/scope and security coverage before findings; use exact followups only.",
+    "- Coding coverage: for implement/write_unittest/fix/debug, require concrete target symbol/file/behavior/failure; cap write_unittest followups to one.",
+    "- Review: diff-first and scope-first; no diff/scope means ask for it, not shell exploration.",
     "```",
     "",
     "Do not use TokenOpt first when it would create MCP+shell double-spend:",
@@ -225,6 +243,39 @@ export function formatInstructionGraphPlan(repoRoot: string, plan = buildInstruc
   ].join("\n");
 }
 
+export function buildNativePromptPack(repoRoot: string): NativePromptPackPlan {
+  const files = TOKENOPT_NATIVE_PROMPTS.map((prompt) =>
+    graphFile(path.join(repoRoot, ".github", "prompts", prompt.fileName), formatNativePromptFile(prompt))
+  );
+  return {
+    files,
+    totalEstimatedTokens: files.reduce((sum, file) => sum + file.estimatedTokens, 0)
+  };
+}
+
+export function formatNativePromptPackPlan(repoRoot: string, plan = buildNativePromptPack(repoRoot)): string {
+  return [
+    "TokenOpt native prompt pack plan",
+    `repo: ${repoRoot}`,
+    `files: ${plan.files.length}`,
+    `estimatedTokens: ${plan.totalEstimatedTokens}`,
+    "",
+    "Files:",
+    ...plan.files.map((file) => `- ${path.relative(repoRoot, file.path)} (${file.estimatedTokens} est tokens)`)
+  ].join("\n");
+}
+
+export function installNativePromptPack(repoRoot: string): string[] {
+  const plan = buildNativePromptPack(repoRoot);
+  const written: string[] = [];
+  for (const file of plan.files) {
+    fs.mkdirSync(path.dirname(file.path), { recursive: true });
+    fs.writeFileSync(file.path, `${file.content.trimEnd()}\n`, "utf8");
+    written.push(file.path);
+  }
+  return written;
+}
+
 export function installInstructionGraph(repoRoot: string): string[] {
   const plan = buildInstructionGraph(repoRoot);
   const written: string[] = [];
@@ -238,6 +289,130 @@ export function installInstructionGraph(repoRoot: string): string[] {
     written.push(file.path);
   }
   return written;
+}
+
+interface NativePromptTemplate {
+  fileName: string;
+  name: string;
+  description: string;
+  argumentHint: string;
+  body: string[];
+}
+
+const TOKENOPT_NATIVE_PROMPTS: NativePromptTemplate[] = [
+  {
+    fileName: "pbi-plan.prompt.md",
+    name: "pbi-plan",
+    description: "Create a compatibility-preserving implementation plan from a concrete PBI or requirement.",
+    argumentHint: "<paste PBI/requirement text, ticket URL, or acceptance criteria>",
+    body: [
+      "Create an implementation plan for the provided PBI/requirement while preserving compatibility. Return JSON.",
+      "",
+      "TokenOpt routing:",
+      "- If no concrete PBI, requirement body, issue URL, or acceptance criteria is provided, do not explore the repo. Ask for the missing artifact in JSON.",
+      "- If a concrete artifact is provided, use TokenOpt as a cost gate only when it can replace broad exploration.",
+      "- Keep any followup exact and bounded.",
+      "",
+      "JSON keys: status, requirement_summary, impacted_areas, implementation_plan, tests, compatibility_risks, missing_items, next_steps."
+    ]
+  },
+  {
+    fileName: "requirement-analysis.prompt.md",
+    name: "requirement-analysis",
+    description: "Analyze a concrete requirement into WHAT, WHY, HOW, acceptance criteria, tests, and unknowns.",
+    argumentHint: "<paste requirement text or ticket URL>",
+    body: [
+      "Analyze the provided requirement. Return JSON with WHAT, WHY, HOW, acceptance criteria, impacted areas, tests, and unknowns.",
+      "",
+      "TokenOpt routing:",
+      "- If the requirement text or ticket URL is missing, do not inspect the repo. Return bounded JSON asking for the requirement artifact.",
+      "- Do not invent repo-specific evidence when the requirement is absent.",
+      "- When artifact exists, use TokenOpt only for broad repo evidence that replaces exploration.",
+      "",
+      "JSON keys: status, what, why, how, acceptance_criteria, impacted_areas, tests, unknowns, evidence_used."
+    ]
+  },
+  {
+    fileName: "write-unittest.prompt.md",
+    name: "write-unittest",
+    description: "Plan or write focused unit tests for a concrete class/module/behavior.",
+    argumentHint: "<target class/module/file and behavior>",
+    body: [
+      "Plan or write focused unit tests for the provided target and behavior. Return JSON unless the user asks for code edits.",
+      "",
+      "TokenOpt routing:",
+      "- Require a concrete target class, module, file, behavior, or failing case.",
+      "- If the target is missing, do not search the repo to guess it. Ask for the target/behavior.",
+      "- If the target exists and TokenOpt full-mode coding tools are available, use coding_coverage once.",
+      "- For write_unittest, use at most one additional allowed MCP followup after compile_evidence.",
+      "",
+      "JSON keys: status, target, behavior, test_location, test_cases, fixtures_or_mocks, assertions, targeted_command, missing_items."
+    ]
+  },
+  {
+    fileName: "security-audit.prompt.md",
+    name: "security-audit",
+    description: "Run a security-focused review only when concrete diff/scope is provided.",
+    argumentHint: "<diff, PR, changed files, route, symbol, or risky surface>",
+    body: [
+      "Perform a security-focused review of the provided changed behavior or risky surface. Return JSON findings.",
+      "",
+      "TokenOpt routing:",
+      "- Use security_audit route.",
+      "- Require concrete diff/scope before findings.",
+      "- Security coverage must consider target/scope, input boundaries, auth/authz, validation/deserialization, secrets/config/dependencies, and tests/guardrails.",
+      "- If scope is missing, do not broad-search. Ask for the diff, PR, changed files, route, symbol, or risky surface.",
+      "- Use exact followups only; never use broad shell review fallback.",
+      "",
+      "JSON keys: status, findings, evidence_used, missing_coverage, non_findings, next_steps."
+    ]
+  },
+  {
+    fileName: "review-code.prompt.md",
+    name: "review-code",
+    description: "Review concrete code diffs with bounded evidence and compact findings.",
+    argumentHint: "<diff, PR, changed files, or exact review target>",
+    body: [
+      "Review the provided code diff/scope. Prioritize correctness, regressions, missing tests, security, and performance. Return JSON findings.",
+      "",
+      "TokenOpt routing:",
+      "- Diff-first and scope-first.",
+      "- If no diff, PR, changed files, file path, symbol, or exact target is provided, do not explore the repo. Ask for the review artifact.",
+      "- When concrete diff/scope exists, use review_diff evidence and exact bounded followups only.",
+      "- Avoid style nits unless they affect behavior.",
+      "",
+      "JSON keys: status, findings, evidence_used, missing_scope, non_findings, suggested_tests."
+    ]
+  },
+  {
+    fileName: "promote-review-memory.prompt.md",
+    name: "promote-review-memory",
+    description: "Extract reusable review-memory candidates from completed task evidence.",
+    argumentHint: "<completed task summary, transcript, diff, or review outcome>",
+    body: [
+      "Identify what should be promoted into review memory after a completed task. Return JSON.",
+      "",
+      "TokenOpt routing:",
+      "- Require completed-task evidence: summary, transcript, diff, review findings, or final outcome.",
+      "- If completed-task evidence is missing, do not inspect the repo. Ask for that evidence.",
+      "- Promote only stable, reusable facts. Avoid stale branch-specific details.",
+      "",
+      "JSON keys: status, memory_candidates, expiry_or_refresh, excluded_items, missing_items, rationale."
+    ]
+  }
+];
+
+function formatNativePromptFile(prompt: NativePromptTemplate): string {
+  return [
+    "---",
+    `name: ${prompt.name}`,
+    `description: ${JSON.stringify(prompt.description)}`,
+    `argument-hint: ${JSON.stringify(prompt.argumentHint)}`,
+    "agent: agent",
+    "---",
+    "",
+    ...prompt.body
+  ].join("\n");
 }
 
 function graphFile(filePath: string, content: string): InstructionGraphFile {
@@ -255,7 +430,10 @@ function rootInstructionGraphContent(): string {
     "Use TokenOpt as a selective context governor, not as MCP-first for every prompt.",
     "",
     "- Broad repo, business/domain, build handoff, flow, review diff, runtime debug, and refactor-scope tasks may use TokenOpt evidence first.",
+    "- Missing-artifact PBI, requirement, unit-test, review-memory, or review prompts should ask for the concrete artifact instead of exploring.",
+    "- Security audit requires concrete diff/scope and exact security followups only.",
     "- Exact file/class/method tasks and small-repo direct edits should use normal narrow search/read unless the user asks for TokenOpt.",
+    "- Copilot prompt files under `.github/prompts` provide native slash prompts for common TokenOpt tasks.",
     "- If a packet says answerable=true, answer from it and avoid broad fallback.",
     "- For code changes, prefer unified diffs or compact edit plans instead of full-file rewrites."
   ].join("\n");
@@ -272,6 +450,8 @@ function reviewInstructionGraphContent(): string {
     "For PR/diff/code-review prompts, prefer task-shaped review evidence.",
     "",
     "- Use `tokenopt_compile_evidence` with `task_type=review_diff` when the prompt contains a concrete diff.",
+    "- If the prompt has no diff, PR, changed files, file path, symbol, or exact target, ask for the review artifact and do not explore the repo.",
+    "- For security review, require concrete scope and use exact security followups only.",
     "- In MCP full mode, use `tokenopt_prepare_java_diff` for Java diffs and `tokenopt_business_contract` for API/schema/security/messaging/test contracts.",
     "- Report compact findings with file, line, severity, evidence, and suggestion.",
     "- Do not spend tokens on import reorder, whitespace, or Lombok-only changes unless they affect compile/runtime behavior."

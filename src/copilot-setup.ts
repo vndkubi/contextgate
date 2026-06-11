@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { installTokenOptInstructions } from "./instruction-audit.js";
+import { installNativePromptPack, installTokenOptInstructions } from "./instruction-audit.js";
 
 export type CopilotSetupScope = "user" | "repo" | "both";
 
@@ -25,6 +25,7 @@ export interface CopilotSetupOptions {
   tokenoptCliPath?: string;
   copilotConfigPath?: string;
   includeRunCommand?: boolean;
+  installPrompts?: boolean;
 }
 
 export interface CopilotSetupResult {
@@ -37,12 +38,14 @@ export interface CopilotSetupResult {
   copilotPathInstructionsPath: string;
   agentsPath?: string;
   copilotAgentPath?: string;
+  promptFiles: string[];
 }
 
 export function setupCopilotProject(options: CopilotSetupOptions): CopilotSetupResult {
   const repoRoot = path.resolve(options.repoRoot);
   const scope = options.scope ?? "both";
   const installAgents = options.installAgents ?? true;
+  const installPrompts = options.installPrompts ?? true;
   const includeRunCommand = options.includeRunCommand ?? false;
   const files: string[] = [];
   const warnings: string[] = [];
@@ -61,6 +64,9 @@ export function setupCopilotProject(options: CopilotSetupOptions): CopilotSetupR
     copilotAgentPath = installTokenOptInstructions(repoRoot, "copilot-agent");
     files.push(copilotAgentPath);
   }
+
+  const promptFiles = installPrompts ? installNativePromptPack(repoRoot) : [];
+  files.push(...promptFiles);
 
   let mcpConfigPath: string | undefined;
   if (scope === "user" || scope === "both") {
@@ -84,6 +90,9 @@ export function setupCopilotProject(options: CopilotSetupOptions): CopilotSetupR
   if (!installAgents) {
     warnings.push("AGENTS.md and the TokenOpt custom agent were skipped; Copilot can still use .github/copilot-instructions.md and .github/instructions/tokenopt.instructions.md, but agent surfaces may miss stronger TokenOpt guidance.");
   }
+  if (!installPrompts) {
+    warnings.push("Copilot prompt files were skipped; users can still rely on always-on instructions, but slash prompts such as /pbi-plan and /review-code will not be installed.");
+  }
   if (!includeRunCommand) {
     warnings.push("TokenOpt MCP was installed in lite mode; command execution and project_facts tools are not exposed unless you rerun setup with --include-run-command.");
   }
@@ -98,7 +107,8 @@ export function setupCopilotProject(options: CopilotSetupOptions): CopilotSetupR
     copilotInstructionsPath,
     copilotPathInstructionsPath,
     agentsPath,
-    copilotAgentPath
+    copilotAgentPath,
+    promptFiles
   };
 }
 

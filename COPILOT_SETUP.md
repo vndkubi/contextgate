@@ -31,6 +31,7 @@ Not implemented yet:
 | Path instructions | Recommended | `tokenopt setup copilot` writes `.github/instructions/tokenopt.instructions.md` with `applyTo: "**"`. |
 | Custom agent | Recommended | `tokenopt setup copilot` writes `.github/agents/tokenopt-cost-gate.agent.md`. |
 | Agent instructions | Recommended | `tokenopt setup copilot` writes `AGENTS.md` by default; use `--no-agents` to skip. |
+| Native prompt files | Recommended | `tokenopt setup copilot` writes `.github/prompts/*.prompt.md` by default; use `--no-prompts` to skip. |
 | Skills | No for V1 | TokenOpt is not packaged as a Copilot skill. MCP + instructions are enough for current behavior. |
 | Hooks | Not yet | Do not install Copilot hooks until `tokenopt hook copilot ...` exists. |
 
@@ -77,6 +78,12 @@ Expected result:
 .github/copilot-instructions.md
 .github/instructions/tokenopt.instructions.md
 .github/agents/tokenopt-cost-gate.agent.md
+.github/prompts/pbi-plan.prompt.md
+.github/prompts/requirement-analysis.prompt.md
+.github/prompts/write-unittest.prompt.md
+.github/prompts/security-audit.prompt.md
+.github/prompts/review-code.prompt.md
+.github/prompts/promote-review-memory.prompt.md
 AGENTS.md
 <home>/.copilot/mcp-config.json
 ```
@@ -92,9 +99,14 @@ node <tokenopt-repo>\dist\cli.js setup copilot --scope repo
 # Install local Copilot CLI MCP config and repo instructions, but skip AGENTS.md.
 node <tokenopt-repo>\dist\cli.js setup copilot --scope user --no-agents
 
+# Install instructions and MCP config, but skip reusable Copilot slash prompts.
+node <tokenopt-repo>\dist\cli.js setup copilot --scope user --no-prompts
+
 # Full mode for repos where Copilot should run builds/tests through TokenOpt MCP.
 node <tokenopt-repo>\dist\cli.js setup copilot --scope user --include-run-command
 ```
+
+After setup, use Copilot UI normally. You can type natural prompts such as `write unit tests for OrderService`, or use native prompt files from chat, for example `/write-unittest OrderService payment authorization`, `/security-audit <diff or PR scope>`, or `/review-code <diff>`.
 
 The generated MCP entry uses:
 

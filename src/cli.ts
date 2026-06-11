@@ -15,7 +15,9 @@ import {
   auditInstructions,
   emitTokenOptInstructions,
   formatInstructionGraphPlan,
+  formatNativePromptPackPlan,
   installInstructionGraph,
+  installNativePromptPack,
   installTokenOptInstructions,
   type InstructionTarget
 } from "./instruction-audit.js";
@@ -80,6 +82,7 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
         files: result.files,
         mcpConfigPath: result.mcpConfigPath,
         installAgents: options.installAgents,
+        installPrompts: options.installPrompts,
         includeRunCommand: options.includeRunCommand
       }
     });
@@ -159,6 +162,12 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
     return 0;
   }
 
+  if (command === "instructions" && subcommand === "prompts") {
+    const loaded = loadConfig();
+    process.stdout.write(`${formatNativePromptPackPlan(loaded.repoRoot)}\n`);
+    return 0;
+  }
+
   if (command === "instructions" && subcommand === "install-graph") {
     const loaded = loadConfig();
     const files = installInstructionGraph(loaded.repoRoot);
@@ -171,6 +180,21 @@ export async function main(argv = process.argv.slice(2)): Promise<number> {
       metadata: { files }
     });
     process.stdout.write(`Installed TokenOpt instruction graph:\n${files.map((filePath) => `- ${filePath}`).join("\n")}\n`);
+    return 0;
+  }
+
+  if (command === "instructions" && subcommand === "install-prompts") {
+    const loaded = loadConfig();
+    const files = installNativePromptPack(loaded.repoRoot);
+    appendEvent(loaded.config, {
+      timestamp: new Date().toISOString(),
+      source: "cli",
+      eventName: "instructions-install-prompts",
+      repoRoot: loaded.repoRoot,
+      action: "install",
+      metadata: { files }
+    });
+    process.stdout.write(`Installed TokenOpt native prompt files:\n${files.map((filePath) => `- ${filePath}`).join("\n")}\n`);
     return 0;
   }
 
@@ -261,11 +285,13 @@ function parseScope(args: string[]): "user" | "repo" {
 function parseCopilotSetupOptions(args: string[]): {
   scope: CopilotSetupScope;
   installAgents: boolean;
+  installPrompts: boolean;
   tokenoptCliPath?: string;
   includeRunCommand: boolean;
 } {
   let scope: CopilotSetupScope = "both";
   let installAgents = true;
+  let installPrompts = true;
   let includeRunCommand = false;
   let tokenoptCliPath: string | undefined;
 
@@ -288,6 +314,14 @@ function parseCopilotSetupOptions(args: string[]): {
       installAgents = false;
       continue;
     }
+    if (arg === "--with-prompts") {
+      installPrompts = true;
+      continue;
+    }
+    if (arg === "--no-prompts") {
+      installPrompts = false;
+      continue;
+    }
     if (arg === "--tokenopt-path") {
       const value = args[index + 1];
       if (!value) {
@@ -308,7 +342,7 @@ function parseCopilotSetupOptions(args: string[]): {
     throw new Error(`Unknown Copilot setup option: ${arg}`);
   }
 
-  return { scope, installAgents, tokenoptCliPath, includeRunCommand };
+  return { scope, installAgents, installPrompts, tokenoptCliPath, includeRunCommand };
 }
 
 function parseMcpMode(args: string[]): "lite" | "full" | undefined {
@@ -364,8 +398,8 @@ function helpText(): string {
 Commands:
   tokenopt init
   tokenopt install codex --scope user|repo
-  tokenopt setup copilot --scope user|repo|both [--no-agents] [--include-run-command]
-  tokenopt install copilot --scope user|repo|both [--no-agents] [--include-run-command]
+  tokenopt setup copilot --scope user|repo|both [--no-agents] [--no-prompts] [--include-run-command]
+  tokenopt install copilot --scope user|repo|both [--no-agents] [--no-prompts] [--include-run-command]
   tokenopt hook codex user-prompt-submit|pre-tool-use|post-tool-use|pre-compact
   tokenopt hook copilot user-prompt-submit|pre-tool-use|post-tool-use|pre-compact
   tokenopt exec -- <command...>
@@ -376,7 +410,9 @@ Commands:
   tokenopt instructions audit
   tokenopt instructions emit --target agents|codex|copilot|copilot-path|copilot-agent
   tokenopt instructions graph
+  tokenopt instructions prompts
   tokenopt instructions install-graph
+  tokenopt instructions install-prompts
   tokenopt instructions install --target agents|codex|copilot|copilot-path|copilot-agent
   tokenopt report
   tokenopt doctor

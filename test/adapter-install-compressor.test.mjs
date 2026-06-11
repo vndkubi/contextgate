@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { adaptDecisionToCodex, normalizeCodexEvent } from "../dist/codex-adapter.js";
 import { buildCopilotCloudMcpConfig, setupCopilotProject } from "../dist/copilot-setup.js";
-import { emitTokenOptInstructions, installTokenOptInstructions } from "../dist/instruction-audit.js";
+import { buildNativePromptPack, emitTokenOptInstructions, installNativePromptPack, installTokenOptInstructions } from "../dist/instruction-audit.js";
 import { compressText } from "../dist/log-compressor.js";
 import { buildCodexHooksConfig, installCodexHooks } from "../dist/install.js";
 import { repoKey } from "../dist/observability.js";
@@ -130,6 +130,25 @@ test("instruction emitter and installer produce idempotent MCP guidance", () => 
   assert.match(fs.readFileSync(copilotAgentPath, "utf8"), /tokenopt\/tokenopt_compile_evidence/);
 });
 
+test("native prompt pack installs reusable Copilot prompt files", () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "tokenopt-native-prompts-"));
+  const plan = buildNativePromptPack(repo);
+  assert.equal(plan.files.length, 6);
+  assert.equal(plan.files.some((file) => file.path.endsWith(path.join(".github", "prompts", "write-unittest.prompt.md"))), true);
+
+  const files = installNativePromptPack(repo);
+  assert.equal(files.length, 6);
+  const writeUnittest = fs.readFileSync(path.join(repo, ".github", "prompts", "write-unittest.prompt.md"), "utf8");
+  assert.match(writeUnittest, /name: write-unittest/);
+  assert.match(writeUnittest, /coding_coverage once/);
+  assert.match(writeUnittest, /at most one additional allowed MCP followup/);
+
+  const securityAudit = fs.readFileSync(path.join(repo, ".github", "prompts", "security-audit.prompt.md"), "utf8");
+  assert.match(securityAudit, /name: security-audit/);
+  assert.match(securityAudit, /Use security_audit route/);
+  assert.match(securityAudit, /never use broad shell review fallback/i);
+});
+
 test("Copilot setup writes repo guidance and merges user MCP config", () => {
   const repo = fs.mkdtempSync(path.join(os.tmpdir(), "tokenopt-copilot-"));
   const copilotConfigPath = path.join(repo, "mcp-config.json");
@@ -163,6 +182,7 @@ test("Copilot setup writes repo guidance and merges user MCP config", () => {
   const copilotInstructions = fs.readFileSync(path.join(repo, ".github", "copilot-instructions.md"), "utf8");
   const copilotPathInstructions = fs.readFileSync(path.join(repo, ".github", "instructions", "tokenopt.instructions.md"), "utf8");
   const copilotAgent = fs.readFileSync(path.join(repo, ".github", "agents", "tokenopt-cost-gate.agent.md"), "utf8");
+  const writeUnittestPrompt = fs.readFileSync(path.join(repo, ".github", "prompts", "write-unittest.prompt.md"), "utf8");
   const agentsInstructions = fs.readFileSync(path.join(repo, "AGENTS.md"), "utf8");
   const config = JSON.parse(fs.readFileSync(copilotConfigPath, "utf8"));
 
@@ -171,6 +191,8 @@ test("Copilot setup writes repo guidance and merges user MCP config", () => {
   assert.match(copilotPathInstructions, /TokenOpt MCP Usage/);
   assert.match(copilotAgent, /name: tokenopt-cost-gate/);
   assert.match(copilotAgent, /tokenopt\/tokenopt_compile_evidence/);
+  assert.match(writeUnittestPrompt, /name: write-unittest/);
+  assert.equal(result.promptFiles.length, 6);
   assert.equal((agentsInstructions.match(/tokenopt:mcp-instructions:start/g) ?? []).length, 1);
   assert.deepEqual(config.mcpServers.keep.tools, ["*"]);
   assert.equal(config.mcpServers.tokenopt.command, "node");
