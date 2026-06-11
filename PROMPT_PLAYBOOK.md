@@ -63,11 +63,41 @@ Investigate the primary learning/recall flow and return files, symbols, risks, a
 Good Copilot slash prompts after setup:
 
 ```text
+/business-deep-dive checkout payments
+/flow-trace checkout API flow
+/trace-bug failing checkout authorization test
 /write-unittest OrderService payment authorization
 /security-audit <diff or PR scope>
 /review-code <diff>
 /pbi-plan <requirement text or ticket URL>
+/refactor-scope OrderService validation extraction
+/performance-analysis checkout latency
+/build-handoff
 ```
+
+Prompt pack coverage against the 37-prompt benchmark:
+
+| Benchmark prompts | Reusable Copilot prompt | Notes |
+| --- | --- | --- |
+| `U1`, `U7`, `J4` | `/flow-trace` | Exact entrypoint/endpoint/class means native narrow search/read first; unknown broad flow may use TokenOpt once. |
+| `U2`, `U6` | `/pbi-plan` | Requires concrete PBI/requirement/ticket/acceptance criteria; otherwise ask and do not inspect repo. |
+| `U3`, `S8` | `/write-unittest` | Requires concrete class/module/file/behavior; full mode may use coding coverage once. |
+| `U4` | `/requirement-analysis` | Requires requirement text or URL; missing artifact is `needs_input_bypass`. |
+| `U5` | `/repo-benchmark-analysis` | Broad repo benchmark/readiness task; TokenOpt-first is appropriate. |
+| `U8`, `S4`, `J6`, `J10`, `J11` | `/trace-bug` | Use `tokenopt_failure_packet` for long logs; otherwise native narrow search/read from failing test, stack frame, or repro. |
+| `U9`, `J14` | `/performance-analysis` | Measurement-first; exact endpoint/query/module uses narrow reads. |
+| `U10` | `/security-audit` | Requires concrete diff/scope/risky surface and security coverage dimensions. |
+| `U11` | `/dependency-analysis` | Use broad build facts only when needed; avoid lockfiles unless the dependency question requires them. |
+| `U12` | `/onboarding-guide` | Broad repo setup/map/verification guide; TokenOpt-first is appropriate. |
+| `S1` | `/spec-autorun` | SpecKit phase/checkpoint planning with evidence reuse. |
+| `S2`, `S6`, `J5` | `/implement-feature` | Use for feature implementation planning; known target bypasses broad ContextGate. |
+| `S3`, `J2`, `J9`, `J12`, `J13`, `J15` | `/review-code` | Diff-first review; no diff/scope means ask instead of exploring. Use `/security-audit` only for security-focused review. |
+| `S5`, `J3`, `J7`, `J8` | `/refactor-scope` | Scope definitions/usages/config/tests/contracts before edits. |
+| `S7` | `/spec-feature-plan` | Feature specification and acceptance criteria from repo/domain evidence. |
+| `S9` | `/promote-review-memory` | Requires completed-task summary/diff/transcript/review outcome. |
+| `S10` | `/context-budget` | Context budget and compaction checkpoint planning. |
+
+Additional reusable prompts outside the 37-prompt suite: `/business-deep-dive`, `/build-handoff`, and `/field-impact`.
 
 Good explicit smoke-test prompt:
 
@@ -135,6 +165,7 @@ This table summarizes the route behavior from the 37-prompt real Codex benchmark
 | Review without a concrete diff | Missing-artifact bypass | Yes, as a cheap gate | Previously expensive; now guarded | Ask for the diff, changed files, PR, or exact target. Do not use shell fallback. |
 | Small repo plus exact file/symbol | Bypass | No | Router marks this as negative control | Use native narrow read/search. |
 | Exact class/method/line-level flow trace | Native narrow search/read | Usually no | Hybrid double-spend risk | Use narrow search/read directly unless you need a broad context summary first. |
+| Exact bug trace / tracebug with known target | Native narrow search/read | No | Hybrid double-spend risk | Start from failing test, stack frame, file, symbol, or repro path. Use `tokenopt_failure_packet` only for long failure output. |
 | Simple non-repo question or tiny command | Bypass | No | Not a TokenOpt workload | Answer directly or run the tiny command. |
 
 Aggregate from that benchmark:
@@ -152,7 +183,7 @@ Add this contract when you want to audit whether the agent chose the right path:
 
 ```text
 Start your answer with:
-Acquisition path: ContextGate MCP | native narrow search/read | diff context
+Acquisition path: ContextGate MCP | native narrow search/read | tokenopt_failure_packet + narrow read | diff context | needs_input_bypass
 Reason:
 Fallback used: yes/no
 ```
@@ -178,6 +209,8 @@ If this is an implementation, unit-test, fix, or debug task and TokenOpt full-mo
 
 If this is an exact code-flow/class/method/PBI task that needs line-level proof, do not call ContextGate first. Use narrow search/read directly.
 
+If this is an exact bug trace with a known file, class, function, line, failing test, stack frame, repro path, or exact behavior, do not call ContextGate first. Use native narrow search/read directly. Use tokenopt_failure_packet only when long failure output needs compression into exact files/lines.
+
 Never do ContextGate first and then repeat the same exploration with shell, search, or read.
 
 Start the answer with:
@@ -197,6 +230,7 @@ Task:
 | Benchmarking TokenOpt | Yes | `Use TokenOpt as the first acquisition path for this benchmark.` |
 | Copilot does not call MCP naturally | Yes | `Use the tokenopt-cost-gate agent if available.` |
 | Exact flow/class/method trace | Usually no | Use narrow search/read directly. |
+| Exact bug trace with known target/failing test/stack frame | No | Use native narrow search/read directly; use `tokenopt_failure_packet` only for long failure output. |
 | Unknown-owner implementation, unit-test, fix, or failure task | Yes in full mode | Use ContextGate coding coverage once, then only allowed coding followups. |
 | Known file/module implementation | Usually no | Start from the known file/module and run narrow validation. |
 | Review current diff | Usually no | Use diff context first; use narrow search/read only for unclear impact. |
@@ -265,6 +299,38 @@ Avoid broad repo scans.
 Task:
 Trace the <flow name> flow end to end.
 Start from the likely entrypoint, follow service/domain/storage/external calls, cite files and symbols, and produce a Mermaid sequence diagram.
+
+Start with:
+Acquisition path:
+Reason:
+Fallback used:
+```
+
+### 3b. Trace Bug / Exact Bug Investigation
+
+Use this when the bug has a concrete failing test, stack frame, file, class, function, line, repro path, or exact behavior. This is a standard bypass workflow: do not call ContextGate first for line-level bug tracing.
+
+```text
+This is an exact bug trace.
+
+Choose the cheapest evidence path first:
+- If the prompt names a file, class, function, line, failing test, stack frame, or repro path, use native narrow search/read directly.
+- Do not call ContextGate first for exact bug tracing; it usually double-spends.
+- If stack trace/build/test output is long, use tokenopt_failure_packet first, then narrow read the suggested slices.
+- If no concrete bug artifact is provided, ask for failing test, stack trace/error output, repro steps, expected vs actual behavior, or target symbol.
+
+Task:
+Trace this bug:
+<paste bug, failure output, failing test, target file/symbol, or repro>
+
+Return:
+- Bug summary
+- Evidence chain
+- Suspected root cause
+- Affected files/symbols
+- Targeted fix location
+- Targeted verification
+- Missing items
 
 Start with:
 Acquisition path:

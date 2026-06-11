@@ -80,7 +80,7 @@ export function emitTokenOptInstructions(target: InstructionTarget = "generic"):
       "- Investigate a broad failure surface before choosing exact files",
       "```",
       "",
-      "Native Copilot prompt files may also be installed under `.github/prompts`: `/pbi-plan`, `/requirement-analysis`, `/write-unittest`, `/security-audit`, `/review-code`, and `/promote-review-memory`.",
+      "Native Copilot prompt files may also be installed under `.github/prompts`: `/trace-bug`, `/flow-trace`, `/write-unittest`, `/implement-feature`, `/pbi-plan`, `/requirement-analysis`, `/security-audit`, `/review-code`, `/performance-analysis`, `/dependency-analysis`, `/spec-feature-plan`, and more.",
       "",
       "Workflow:",
       "",
@@ -111,7 +111,7 @@ export function emitTokenOptInstructions(target: InstructionTarget = "generic"):
     "- Unit-test planning before writing tests",
     "```",
     "",
-    "If `.github/prompts` is installed, users may call native Copilot prompt files such as `/pbi-plan`, `/requirement-analysis`, `/write-unittest`, `/security-audit`, `/review-code`, or `/promote-review-memory`. Treat those prompt files as normal user intent plus the routing rules in this instruction file.",
+    "If `.github/prompts` is installed, users may call native Copilot prompt files such as `/trace-bug`, `/flow-trace`, `/write-unittest`, `/implement-feature`, `/pbi-plan`, `/requirement-analysis`, `/security-audit`, `/review-code`, `/performance-analysis`, `/dependency-analysis`, `/spec-feature-plan`, or `/promote-review-memory`. Treat those prompt files as normal user intent plus the routing rules in this instruction file.",
     "",
     "Quality-first routing guardrails:",
     "",
@@ -301,6 +301,134 @@ interface NativePromptTemplate {
 
 const TOKENOPT_NATIVE_PROMPTS: NativePromptTemplate[] = [
   {
+    fileName: "business-deep-dive.prompt.md",
+    name: "business-deep-dive",
+    description: "Study a product, business, or domain area from repo evidence.",
+    argumentHint: "<business area, domain term, product capability, or repo scope>",
+    body: [
+      "Study the provided business/domain area from repository evidence. Return JSON.",
+      "",
+      "TokenOpt routing:",
+      "- This is usually a broad repo/domain task, so use TokenOpt as a cost gate when it can replace broad exploration.",
+      "- If the requested area is named, require evidence tied to that target before answerable=true.",
+      "- If exact line-level flow proof is needed, switch to native narrow search/read for that exact flow.",
+      "",
+      "JSON keys: status, business_summary, actors, concepts, glossary, flows, evidence_used, gaps, next_steps."
+    ]
+  },
+  {
+    fileName: "build-handoff.prompt.md",
+    name: "build-handoff",
+    description: "Create a build/onboarding/daily handoff grounded in repo facts.",
+    argumentHint: "<optional target module or handoff focus>",
+    body: [
+      "Create a concise build/onboarding/daily handoff grounded in repository evidence. Return JSON.",
+      "",
+      "TokenOpt routing:",
+      "- This is a broad repo handoff task; use tokenopt_compile_evidence once as a cost gate when available.",
+      "- If answerable=true, answer from the packet and do not gather redundant repo facts.",
+      "- Prefer copied package/build commands over inferred commands.",
+      "",
+      "JSON keys: status, build_system, package_manager, key_commands, repo_map, fast_validation, risks, evidence_used."
+    ]
+  },
+  {
+    fileName: "context-budget.prompt.md",
+    name: "context-budget",
+    description: "Inspect context budget risks and recommend compaction checkpoints.",
+    argumentHint: "<optional workflow, task, or repo area>",
+    body: [
+      "Inspect context budget risks and recommend compaction/checkpoint strategy. Return JSON.",
+      "",
+      "TokenOpt routing:",
+      "- Use TokenOpt for broad repo shape and cost-risk evidence.",
+      "- Do not read large raw files unless a concrete budget driver is named.",
+      "- Recommend checkpoints based on evidence, not generic advice.",
+      "",
+      "JSON keys: status, budget_drivers, risky_workflows, compaction_checkpoints, reuse_candidates, missing_items, evidence_used."
+    ]
+  },
+  {
+    fileName: "dependency-analysis.prompt.md",
+    name: "dependency-analysis",
+    description: "Analyze dependency/build graph risks and targeted verification.",
+    argumentHint: "<dependency, package, module, conflict, or build symptom>",
+    body: [
+      "Analyze dependency/build risks and propose targeted verification. Return JSON.",
+      "",
+      "TokenOpt routing:",
+      "- Use TokenOpt for broad build facts and dependency context when the target is not exact.",
+      "- If a concrete dependency/config/file is named, use native narrow search/read around that artifact.",
+      "- Avoid lockfile reads unless they are necessary for the stated dependency question.",
+      "",
+      "JSON keys: status, dependency_scope, build_files, risks, verification_commands, missing_items, evidence_used."
+    ]
+  },
+  {
+    fileName: "field-impact.prompt.md",
+    name: "field-impact",
+    description: "Analyze impact of changing a field, schema, property, or API contract.",
+    argumentHint: "<field/schema/property/API name>",
+    body: [
+      "Analyze the impact of changing the provided field/schema/property/API contract. Return JSON.",
+      "",
+      "TokenOpt routing:",
+      "- This is an exact impact task; prefer native narrow search/read around the named field or contract.",
+      "- Use TokenOpt only for broad business/context summary if needed before exact impact work.",
+      "- Cite producers, consumers, validation, persistence, API contracts, tests, and migration risks.",
+      "",
+      "JSON keys: status, target, producers, consumers, validation, persistence, api_contracts, tests, migration_risks, evidence_used."
+    ]
+  },
+  {
+    fileName: "flow-trace.prompt.md",
+    name: "flow-trace",
+    description: "Trace an exact code/API/business flow with line-level evidence.",
+    argumentHint: "<flow name, endpoint, entrypoint, class, or behavior>",
+    body: [
+      "Trace the provided flow end to end and cite exact evidence. Return JSON unless the user asks for Mermaid.",
+      "",
+      "TokenOpt routing:",
+      "- If the prompt names an entrypoint, endpoint, class, route, or exact behavior, use native narrow search/read directly.",
+      "- Do not call ContextGate first for line-level flow proof; it usually double-spends.",
+      "- If the owner is unknown and the task is broad flow discovery, use TokenOpt once, then exact followups only.",
+      "",
+      "JSON keys: status, acquisition_path, entrypoints, ordered_steps, files_and_symbols, unknown_edges, tests, evidence_used."
+    ]
+  },
+  {
+    fileName: "implement-feature.prompt.md",
+    name: "implement-feature",
+    description: "Implement or plan a concrete feature with targeted validation.",
+    argumentHint: "<feature/PBI/spec text and optional target module>",
+    body: [
+      "Implement or plan the provided feature using the smallest safe change. Return JSON if planning; edit files only if explicitly asked.",
+      "",
+      "TokenOpt routing:",
+      "- If the owning file/module is known, use native narrow search/read and targeted validation.",
+      "- If the owning area is unknown and full-mode coding tools are available, use coding_coverage once.",
+      "- Do not accept coding answerability without exact target, signature/definition, dependencies/usages, test neighbor/style, and build/test command.",
+      "",
+      "JSON keys: status, scope, target_files, implementation_steps, tests, validation, risks, missing_items."
+    ]
+  },
+  {
+    fileName: "onboarding-guide.prompt.md",
+    name: "onboarding-guide",
+    description: "Create a concise onboarding guide grounded in repo evidence.",
+    argumentHint: "<optional audience or module>",
+    body: [
+      "Create a concise onboarding guide grounded in repository evidence. Return JSON sections and citations.",
+      "",
+      "TokenOpt routing:",
+      "- This is a broad repo task; use TokenOpt as a cost gate for build facts, repo shape, docs, and quick validation.",
+      "- Do not inspect exact source files unless the onboarding target names a specific module.",
+      "- Prefer verified setup and test commands from repo files.",
+      "",
+      "JSON keys: status, audience, setup, repo_map, common_workflows, verification, risks, evidence_used."
+    ]
+  },
+  {
     fileName: "pbi-plan.prompt.md",
     name: "pbi-plan",
     description: "Create a compatibility-preserving implementation plan from a concrete PBI or requirement.",
@@ -317,6 +445,22 @@ const TOKENOPT_NATIVE_PROMPTS: NativePromptTemplate[] = [
     ]
   },
   {
+    fileName: "performance-analysis.prompt.md",
+    name: "performance-analysis",
+    description: "Analyze likely performance hotspots with measurement-first optimization guidance.",
+    argumentHint: "<hotspot, workflow, query, endpoint, or module>",
+    body: [
+      "Analyze likely performance hotspots and propose measurement-first optimizations. Return JSON.",
+      "",
+      "TokenOpt routing:",
+      "- If no hotspot/target is named, use TokenOpt for broad repo evidence and clearly mark hypotheses.",
+      "- If an endpoint/query/module is named, use native narrow search/read around that exact path.",
+      "- Do not propose fixes without measurement and targeted validation.",
+      "",
+      "JSON keys: status, target, suspected_hotspots, measurements, optimization_options, validation, risks, evidence_used."
+    ]
+  },
+  {
     fileName: "requirement-analysis.prompt.md",
     name: "requirement-analysis",
     description: "Analyze a concrete requirement into WHAT, WHY, HOW, acceptance criteria, tests, and unknowns.",
@@ -330,6 +474,38 @@ const TOKENOPT_NATIVE_PROMPTS: NativePromptTemplate[] = [
       "- When artifact exists, use TokenOpt only for broad repo evidence that replaces exploration.",
       "",
       "JSON keys: status, what, why, how, acceptance_criteria, impacted_areas, tests, unknowns, evidence_used."
+    ]
+  },
+  {
+    fileName: "refactor-scope.prompt.md",
+    name: "refactor-scope",
+    description: "Scope a refactor/migration with impacted usages, contracts, config, and tests.",
+    argumentHint: "<symbol, API, migration, resource, package, or behavior>",
+    body: [
+      "Scope the provided refactor or migration. Return impacted definitions, usages, contracts, config, tests, and risks as JSON.",
+      "",
+      "TokenOpt routing:",
+      "- If the refactor target is exact, use native narrow search/read for definitions and usages.",
+      "- Use TokenOpt for broader impact planning only when it can replace repo-wide exploration.",
+      "- Keep output as a plan unless the user explicitly asks for edits.",
+      "",
+      "JSON keys: status, target, definitions, usages, contracts, config, tests, migration_risks, validation_plan, evidence_used."
+    ]
+  },
+  {
+    fileName: "repo-benchmark-analysis.prompt.md",
+    name: "repo-benchmark-analysis",
+    description: "Analyze a repository as a benchmark target with cost and task-class risks.",
+    argumentHint: "<optional benchmark focus>",
+    body: [
+      "Analyze this repository as a benchmark target: build facts, repo shape, likely task classes, and cost risks. Return JSON.",
+      "",
+      "TokenOpt routing:",
+      "- This is a broad repo analysis task; use TokenOpt as a cost gate.",
+      "- Do not enumerate all files in model context; rely on bounded inventory/facts.",
+      "- Identify which task classes should use TokenOpt and which should bypass it.",
+      "",
+      "JSON keys: status, build_facts, repo_shape, likely_task_classes, cost_risks, benchmark_suggestions, evidence_used."
     ]
   },
   {
@@ -365,6 +541,71 @@ const TOKENOPT_NATIVE_PROMPTS: NativePromptTemplate[] = [
       "- Use exact followups only; never use broad shell review fallback.",
       "",
       "JSON keys: status, findings, evidence_used, missing_coverage, non_findings, next_steps."
+    ]
+  },
+  {
+    fileName: "spec-autorun.prompt.md",
+    name: "spec-autorun",
+    description: "Plan a SpecKit /autorun workflow with bounded phases and evidence reuse.",
+    argumentHint: "<spec, feature, or workflow goal>",
+    body: [
+      "Plan a SpecKit /autorun workflow with bounded phases, evidence reuse, and verification checkpoints. Return JSON.",
+      "",
+      "TokenOpt routing:",
+      "- Use TokenOpt for broad planning only when it replaces exploration.",
+      "- Split the work into bounded phases with clear stop/verify points.",
+      "- Reuse evidence packets and avoid repeating the same searches across phases.",
+      "",
+      "JSON keys: status, phases, evidence_reuse, checkpoints, validation, stop_conditions, risks."
+    ]
+  },
+  {
+    fileName: "spec-feature-plan.prompt.md",
+    name: "spec-feature-plan",
+    description: "Specify or plan a feature from repo/domain evidence with acceptance criteria.",
+    argumentHint: "<feature idea, spec text, or acceptance criteria>",
+    body: [
+      "Specify or plan the provided feature from repo/domain evidence and produce acceptance criteria. Return JSON.",
+      "",
+      "TokenOpt routing:",
+      "- If feature/spec text is missing, ask for it instead of exploring.",
+      "- If provided, use TokenOpt for broad repo/domain evidence and exact followups only for named targets.",
+      "- Keep implementation, tests, validation, and unknowns explicit.",
+      "",
+      "JSON keys: status, feature_summary, domain_evidence, acceptance_criteria, implementation_outline, tests, unknowns, evidence_used."
+    ]
+  },
+  {
+    fileName: "startup-flow.prompt.md",
+    name: "startup-flow",
+    description: "Trace application startup/bootstrap flow or debug startup failure.",
+    argumentHint: "<application/module, startup failure, stack trace, or config target>",
+    body: [
+      "Trace startup/bootstrap flow or debug the provided startup failure. Return JSON.",
+      "",
+      "TokenOpt routing:",
+      "- For exact startup flow tracing with known entrypoint/config, use native narrow search/read.",
+      "- For long stack traces/build logs, use tokenopt_failure_packet to extract exact files/lines before bounded reads.",
+      "- If no startup artifact or target is provided, ask for entrypoint, config, stack trace, or failing command.",
+      "",
+      "JSON keys: status, acquisition_path, entrypoint, initialization_order, config_loading, failure_points, targeted_verification, evidence_used."
+    ]
+  },
+  {
+    fileName: "trace-bug.prompt.md",
+    name: "trace-bug",
+    description: "Trace an exact bug from concrete failure evidence using native narrow reads by default.",
+    argumentHint: "<failing test, stack trace, error output, repro steps, file, class, function, or behavior>",
+    body: [
+      "Trace the provided bug using exact evidence. Return JSON.",
+      "",
+      "TokenOpt routing:",
+      "- If a file, class, function, line, failing test, stack frame, or exact behavior is provided, use native narrow search/read directly.",
+      "- Do not call ContextGate first for exact bug tracing; it usually double-spends.",
+      "- If stack trace/build/test output is long, use tokenopt_failure_packet first, then narrow read the suggested slices.",
+      "- If no concrete bug artifact is provided, ask for failing test, stack trace/error output, repro steps, expected vs actual behavior, or target symbol.",
+      "",
+      "JSON keys: status, acquisition_path, bug_summary, evidence_chain, suspected_root_cause, affected_files, targeted_fix_location, verification, missing_items."
     ]
   },
   {
@@ -432,6 +673,7 @@ function rootInstructionGraphContent(): string {
     "- Broad repo, business/domain, build handoff, flow, review diff, runtime debug, and refactor-scope tasks may use TokenOpt evidence first.",
     "- Missing-artifact PBI, requirement, unit-test, review-memory, or review prompts should ask for the concrete artifact instead of exploring.",
     "- Security audit requires concrete diff/scope and exact security followups only.",
+    "- Exact bug traces with file/class/function/line/failing test/repro evidence should use native narrow search/read first; use `tokenopt_failure_packet` only for long failure output.",
     "- Exact file/class/method tasks and small-repo direct edits should use normal narrow search/read unless the user asks for TokenOpt.",
     "- Copilot prompt files under `.github/prompts` provide native slash prompts for common TokenOpt tasks.",
     "- If a packet says answerable=true, answer from it and avoid broad fallback.",
@@ -466,6 +708,7 @@ function runtimeInstructionGraphContent(): string {
     "",
     "# TokenOpt Runtime And Java Tasks",
     "",
+    "- Exact trace-bug tasks with a named file, class, function, line, failing test, stack frame, or repro path should use native narrow search/read directly.",
     "- Compress Java stack traces and Maven/Gradle logs before carrying them forward.",
     "- Preserve Caused by chains, user-code frames, first framework boundary, failing tests, and final build stats.",
     "- In MCP full mode, use `tokenopt_jakarta_annotation_filter` for Lombok-heavy entities and `tokenopt_assemble_spring_context` for actuator/beans JSON.",

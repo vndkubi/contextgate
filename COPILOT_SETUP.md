@@ -13,6 +13,7 @@ Implemented:
 - Copilot path-specific instructions: `.github/instructions/tokenopt.instructions.md`
 - Copilot custom agent profile: `.github/agents/tokenopt-cost-gate.agent.md`
 - Agent instructions: `AGENTS.md`
+- Native Copilot prompt files: `.github/prompts/*.prompt.md`
 - Instruction audit: `tokenopt instructions audit`
 - Copilot setup verification: `tokenopt doctor copilot`
 
@@ -78,11 +79,26 @@ Expected result:
 .github/copilot-instructions.md
 .github/instructions/tokenopt.instructions.md
 .github/agents/tokenopt-cost-gate.agent.md
+.github/prompts/business-deep-dive.prompt.md
+.github/prompts/build-handoff.prompt.md
+.github/prompts/context-budget.prompt.md
+.github/prompts/dependency-analysis.prompt.md
+.github/prompts/field-impact.prompt.md
+.github/prompts/flow-trace.prompt.md
+.github/prompts/implement-feature.prompt.md
+.github/prompts/onboarding-guide.prompt.md
 .github/prompts/pbi-plan.prompt.md
+.github/prompts/performance-analysis.prompt.md
 .github/prompts/requirement-analysis.prompt.md
-.github/prompts/write-unittest.prompt.md
-.github/prompts/security-audit.prompt.md
+.github/prompts/refactor-scope.prompt.md
+.github/prompts/repo-benchmark-analysis.prompt.md
 .github/prompts/review-code.prompt.md
+.github/prompts/security-audit.prompt.md
+.github/prompts/spec-autorun.prompt.md
+.github/prompts/spec-feature-plan.prompt.md
+.github/prompts/startup-flow.prompt.md
+.github/prompts/trace-bug.prompt.md
+.github/prompts/write-unittest.prompt.md
 .github/prompts/promote-review-memory.prompt.md
 AGENTS.md
 <home>/.copilot/mcp-config.json
@@ -106,7 +122,7 @@ node <tokenopt-repo>\dist\cli.js setup copilot --scope user --no-prompts
 node <tokenopt-repo>\dist\cli.js setup copilot --scope user --include-run-command
 ```
 
-After setup, use Copilot UI normally. You can type natural prompts such as `write unit tests for OrderService`, or use native prompt files from chat, for example `/write-unittest OrderService payment authorization`, `/security-audit <diff or PR scope>`, or `/review-code <diff>`.
+After setup, use Copilot UI normally. You can type natural prompts such as `write unit tests for OrderService`, or use native prompt files from chat, for example `/trace-bug <failing test or stack frame>`, `/flow-trace <endpoint or entrypoint>`, `/write-unittest OrderService payment authorization`, `/security-audit <diff or PR scope>`, or `/review-code <diff>`.
 
 The generated MCP entry uses:
 

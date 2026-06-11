@@ -127,7 +127,7 @@ node dist/cli.js instructions prompts
 node dist/cli.js instructions install-prompts
 ```
 
-`agents`/`codex` writes `AGENTS.md`; `copilot` writes `.github/copilot-instructions.md`; `copilot-path` writes `.github/instructions/tokenopt.instructions.md` with `applyTo: "**"`; `copilot-agent` writes `.github/agents/tokenopt-cost-gate.agent.md`; `instructions install-prompts` writes `.github/prompts/*.prompt.md` for native Copilot slash prompts such as `/pbi-plan`, `/requirement-analysis`, `/write-unittest`, `/security-audit`, `/review-code`, and `/promote-review-memory`. These files tell agents to use TokenOpt as a cost gate, answer from the packet when `answerable=true`, and avoid MCP-first plus shell fallback for exact code-flow/class/PBI tasks.
+`agents`/`codex` writes `AGENTS.md`; `copilot` writes `.github/copilot-instructions.md`; `copilot-path` writes `.github/instructions/tokenopt.instructions.md` with `applyTo: "**"`; `copilot-agent` writes `.github/agents/tokenopt-cost-gate.agent.md`; `instructions install-prompts` writes `.github/prompts/*.prompt.md` for native Copilot slash prompts. The prompt pack covers business deep dives, flow traces, trace-bug, implementation and PBI planning, requirement analysis, unit tests, review/security, refactor scope, performance/dependency/context analysis, onboarding/build handoff, and SpecKit planning. These files tell agents to use TokenOpt as a cost gate, answer from the packet when `answerable=true`, and avoid MCP-first plus shell fallback for exact code-flow/class/PBI tasks.
 
 `instructions graph` plans a shorter root instruction plus path-specific review/runtime instruction files. `instructions install-graph` writes that graph with TokenOpt markers so root guidance stays small while review/debug guidance stays near relevant paths.
 
@@ -140,7 +140,7 @@ node <tokenopt-repo>\dist\cli.js doctor copilot
 
 This installs `.github/copilot-instructions.md`, `.github/instructions/tokenopt.instructions.md`, `.github/agents/tokenopt-cost-gate.agent.md`, `AGENTS.md`, `.github/prompts/*.prompt.md`, and merges a lite `tokenopt` stdio MCP server into `<home>/.copilot/mcp-config.json` using `node <absolute-tokenopt-cli-js> mcp --mode lite`. It does not install Copilot hooks yet; TokenOpt's Copilot integration is MCP + instructions + native prompt files today. Add `--include-run-command` only for repos where Copilot should run builds/tests through TokenOpt MCP.
 
-After setup, use Copilot/Codex normally. In Copilot UI, call native slash prompts such as `/write-unittest OrderService payment authorization` or `/security-audit <diff or PR scope>`. In Codex, type natural tasks; `AGENTS.md` carries the routing rules.
+After setup, use Copilot/Codex normally. In Copilot UI, call native slash prompts such as `/trace-bug <failing test or stack frame>`, `/write-unittest OrderService payment authorization`, or `/security-audit <diff or PR scope>`. In Codex, type natural tasks; `AGENTS.md` carries the routing rules.
 
 ## Benchmark
 
