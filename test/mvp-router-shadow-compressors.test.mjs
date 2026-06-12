@@ -14,6 +14,7 @@ import { routeTask } from "../dist/router.js";
 test("router classifies review, debug, refactor, exact, and small-repo bypass tasks", () => {
   assert.equal(routeTask({ task: "Review this PR diff for changed files" }).taskClass, "needs_input_bypass");
   assert.equal(routeTask({ task: "Review this diff:\ndiff --git a/src/orders/OrderService.ts b/src/orders/OrderService.ts" }).taskClass, "review_diff");
+  assert.equal(routeTask({ task: "/review-code branch feature/orders-fix to branch develop/main. Review net diff in two phases." }).taskClass, "review_diff");
   assert.equal(routeTask({ task: "Perform a security-focused review of changed behavior or risky surfaces. Return JSON findings." }).taskClass, "security_audit");
   assert.equal(routeTask({ task: "Code review this PR. Review focus: security privilege automaton language equivalence.\ndiff --git a/Authz.java b/Authz.java" }).taskClass, "review_diff");
   assert.equal(routeTask({ task: "Create an implementation plan for a small PBI/requirement while preserving compatibility. Return JSON." }).taskClass, "needs_input_bypass");

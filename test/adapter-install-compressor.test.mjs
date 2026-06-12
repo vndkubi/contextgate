@@ -157,6 +157,9 @@ test("native prompt pack installs reusable Copilot prompt files", () => {
 
   const reviewCode = fs.readFileSync(path.join(repo, ".github", "prompts", "review-code.prompt.md"), "utf8");
   assert.match(reviewCode, /two phases/i);
+  assert.match(reviewCode, /first call `tokenopt_compile_evidence`/);
+  assert.match(reviewCode, /task_type=review_diff/);
+  assert.match(reviewCode, /branch pair/);
   assert.match(reviewCode, /PR merge\/head worktree/);
   assert.match(reviewCode, /ISTQB-style/);
   assert.match(reviewCode, /user_checklist/);

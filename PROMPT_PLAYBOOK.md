@@ -177,7 +177,9 @@ Review this PR/diff in two phases:
 1. Technical review: correctness, regressions, security, performance, reliability, compatibility, and maintainability.
 2. Business/test coverage review: requirement coverage, edge cases, and ISTQB-style test design.
 
+When TokenOpt MCP is available and a concrete review artifact exists, first call `tokenopt_compile_evidence` with `task_type=review_diff`, current `cwd`, budget around 2200, and the full user request plus the complete net unified diff in `task`.
 Use the net PR diff and PR merge/head worktree for any follow-up reads/searches.
+For branch-pair review, treat target/base branch and feature/head branch as the final PR scope, acquire the merge-base net diff, then call TokenOpt before writing the review.
 If the user provides a review checklist, treat it as a required review rubric and return checklist coverage item by item.
 Do not review per-commit patch output as the final PR state.
 Return compact JSON with:
@@ -186,6 +188,7 @@ technical_review, business_review, istqb_checks, user_checklist, review_status, 
 
 Technical review rules:
 
+- Do not skip TokenOpt silently. If MCP is unavailable, say so in `notes` and continue with native net-diff review.
 - Report only introduced, actionable defects.
 - If TokenOpt evidence includes `recall_probe` facts, adjudicate each checked probe as a technical finding, coverage gap, or explicit non-issue with contrary evidence. Promote P1/P2 `technical_finding_candidate=true` probes unless contrary evidence disproves them.
 - Before returning no findings, explicitly check changed invariants, effective config/policy math, parser/encoding boundaries, backwards compatibility, concurrency/async behavior, resource lifecycle, null/error paths, and call replacements.

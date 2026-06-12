@@ -230,18 +230,20 @@ function getMissingArtifactReason(task: string, prompt: string, signals: string[
     return "Prompt asks to analyze a requirement but no requirement text, ticket, or acceptance criteria was provided.";
   }
   if (isReviewPrompt(prompt)) {
-    return "Prompt asks for review but no concrete diff, changed file list, PR, symbol, or risky surface was provided.";
+    return "Prompt asks for review but no concrete diff, changed file list, PR, branch pair, symbol, or risky surface was provided.";
   }
   return undefined;
 }
 
 function hasConcreteArtifact(task: string, signals: string[]): boolean {
-  if (signals.some((signal) => signal.startsWith("file:") || signal.startsWith("symbol:") || signal === "diff:inline")) {
+  if (signals.some((signal) => signal.startsWith("file:") || signal.startsWith("symbol:") || signal === "diff:inline" || signal === "review:branch-pair")) {
     return true;
   }
   return /https?:\/\/\S+/i.test(task) ||
     /\b(?:PBI|PB|REQ|ISSUE|BUG|TASK|JIRA|GH|PR)[-_]?\d+\b/i.test(task) ||
     /#\d{2,}\b/.test(task) ||
+    /\b(?:base|target|develop|main|master|release|branch)\s+[-A-Za-z0-9_./]+\s+(?:to|into|<-|<--|from|vs|against)\s+(?:head|source|feature|branch)?\s*[-A-Za-z0-9_./]+/i.test(task) ||
+    /\b(?:feature|head|source|branch)\s+[-A-Za-z0-9_./]+\s+(?:to|into|->|-->|against)\s+(?:develop|main|master|release|target|base|branch)\s+[-A-Za-z0-9_./]+/i.test(task) ||
     /\b(?:requirement|pbi|acceptance criteria|completed task|task summary|transcript|diff|changed files?|risky surface|behavior)\s*:\s*\S.{20,}/is.test(task) ||
     /```[\s\S]{20,}```/.test(task) ||
     /[`"'][^`"']{20,}[`"']/.test(task);
@@ -325,6 +327,10 @@ function collectPromptSignals(task: string): string[] {
   }
   if (/\b(PR|pull request|changed files?)\b/i.test(task)) {
     signals.push("review:changed-files");
+  }
+  if (/\bbranch\s+[-A-Za-z0-9_./]+\s+(?:to|into|against|vs)\s+branch\s+[-A-Za-z0-9_./]+/i.test(task) ||
+      /\b(?:base|target|head|source)\s*[:=]\s*[-A-Za-z0-9_./]+/i.test(task)) {
+    signals.push("review:branch-pair");
   }
   return [...new Set(signals)].slice(0, 16);
 }
