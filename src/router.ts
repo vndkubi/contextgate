@@ -214,6 +214,15 @@ function hasLongFailureArtifact(task: string): boolean {
 }
 
 function getMissingArtifactReason(task: string, prompt: string, signals: string[]): string | undefined {
+  if (isReviewPrompt(prompt)) {
+    if (hasCodeReviewArtifact(task, signals)) {
+      return undefined;
+    }
+    const hasRequirementReference = signals.includes("business:jira") || signals.includes("business:confluence");
+    return hasRequirementReference
+      ? "Prompt asks for code review and includes Jira/Confluence requirement evidence, but no concrete code review artifact was provided. Read the requirement via MCP when available, but ask for a diff, PR, branch pair, changed file list, file path, symbol, or risky surface before reviewing code."
+      : "Prompt asks for review but no concrete diff, changed file list, PR, branch pair, symbol, or risky surface was provided.";
+  }
   if (hasConcreteArtifact(task, signals)) {
     return undefined;
   }
@@ -229,10 +238,18 @@ function getMissingArtifactReason(task: string, prompt: string, signals: string[
   if (isRequirementAnalysisPrompt(prompt)) {
     return "Prompt asks to analyze a requirement but no requirement text, ticket, or acceptance criteria was provided.";
   }
-  if (isReviewPrompt(prompt)) {
-    return "Prompt asks for review but no concrete diff, changed file list, PR, branch pair, symbol, or risky surface was provided.";
-  }
   return undefined;
+}
+
+function hasCodeReviewArtifact(task: string, signals: string[]): boolean {
+  if (signals.some((signal) => signal.startsWith("file:") || signal.startsWith("symbol:") || signal === "diff:inline" || signal === "review:branch-pair")) {
+    return true;
+  }
+  return /https?:\/\/\S*(?:\/pull\/\d+|\/merge_requests\/\d+|\/compare\/|\/commit\/)/i.test(task) ||
+    /\b(?:PR|pull request|merge request|MR)\s*#?\d+\b/i.test(task) ||
+    /\b(?:changed files?|diff|risky surface)\s*:\s*\S.{20,}/is.test(task) ||
+    /\b(?:base|target|develop|main|master|release|branch)\s+[-A-Za-z0-9_./]+\s+(?:to|into|<-|<--|from|vs|against)\s+(?:head|source|feature|branch)?\s*[-A-Za-z0-9_./]+/i.test(task) ||
+    /\b(?:feature|head|source|branch)\s+[-A-Za-z0-9_./]+\s+(?:to|into|->|-->|against)\s+(?:develop|main|master|release|target|base|branch)\s+[-A-Za-z0-9_./]+/i.test(task);
 }
 
 function hasConcreteArtifact(task: string, signals: string[]): boolean {

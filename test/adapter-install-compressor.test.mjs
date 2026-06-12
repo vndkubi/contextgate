@@ -161,6 +161,8 @@ test("native prompt pack installs reusable Copilot prompt files", () => {
   assert.match(reviewCode, /task_type=review_diff/);
   assert.match(reviewCode, /branch pair/);
   assert.match(reviewCode, /Jira\/Confluence MCP tools/);
+  assert.match(reviewCode, /relevant attachments/);
+  assert.match(reviewCode, /Do not ask the user to paste the full ticket\/page content/);
   assert.match(reviewCode, /requirement evidence/);
   assert.match(reviewCode, /PR merge\/head worktree/);
   assert.match(reviewCode, /ISTQB-style/);

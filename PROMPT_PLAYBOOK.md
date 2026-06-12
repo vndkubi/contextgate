@@ -180,7 +180,7 @@ Review this PR/diff in two phases:
 When TokenOpt MCP is available and a concrete review artifact exists, first call `tokenopt_compile_evidence` with `task_type=review_diff`, current `cwd`, budget around 2200, and the full user request plus the complete net unified diff in `task`.
 Use the net PR diff and PR merge/head worktree for any follow-up reads/searches.
 For branch-pair review, treat target/base branch and feature/head branch as the final PR scope, acquire the merge-base net diff, then call TokenOpt before writing the review.
-If the user attaches or references Jira tickets or Confluence pages, use the available Jira/Confluence MCP tools to read them before business/test coverage review. These are requirement artifacts, not a substitute for the code diff/PR/branch pair.
+If the user attaches or references Jira tickets or Confluence pages, use the available Jira/Confluence MCP tools to read the ticket/page and relevant attachments before business/test coverage review. Do not ask the user to paste the full ticket/page content when a connector can read it. These are requirement artifacts, not a substitute for the code diff/PR/branch pair.
 If the user provides a review checklist, treat it as a required review rubric and return checklist coverage item by item.
 Do not review per-commit patch output as the final PR state.
 Return compact JSON with:
@@ -199,7 +199,7 @@ Technical review rules:
 Business/test coverage rules:
 
 - Keep coverage gaps separate from technical findings.
-- Ground requirement coverage in Jira/Confluence evidence when the user provides those artifacts. If Jira/Confluence MCP is unavailable or unreadable, say so in `notes` and mark requirement-backed coverage as missing or assumption-based.
+- Ground requirement coverage in Jira/Confluence evidence, including ticket/page attachments when relevant, when the user provides those artifacts. If Jira/Confluence MCP is unavailable or unreadable, say so in `notes` and mark requirement-backed coverage as missing or assumption-based.
 - Apply ISTQB-style dimensions where relevant: boundary values, equivalence partitions, negative/error cases, state transitions, concurrency/async, and compatibility/backward compatibility.
 - Tie every suggested test to the changed behavior and expected business rule.
 - Missing tests are usually `comment`, not `request_changes`, unless the risky behavior is untested enough to make the patch unsafe.

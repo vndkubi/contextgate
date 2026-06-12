@@ -19,6 +19,13 @@ test("router classifies review, debug, refactor, exact, and small-repo bypass ta
   assert.equal(branchReviewWithRequirements.taskClass, "review_diff");
   assert.equal(branchReviewWithRequirements.promptSignals.includes("business:jira"), true);
   assert.equal(branchReviewWithRequirements.promptSignals.includes("business:confluence"), true);
+  const requirementOnlyReview = routeTask({ task: "/review-code Jira ABC-123 with Confluence page https://example.atlassian.net/wiki/spaces/ABC/pages/123/Spec" });
+  assert.equal(requirementOnlyReview.taskClass, "needs_input_bypass");
+  assert.equal(requirementOnlyReview.evidenceContract, "artifact_sufficiency");
+  assert.equal(requirementOnlyReview.promptSignals.includes("artifact:missing"), true);
+  assert.equal(requirementOnlyReview.promptSignals.includes("business:jira"), true);
+  assert.equal(requirementOnlyReview.promptSignals.includes("business:confluence"), true);
+  assert.match(requirementOnlyReview.reason, /requirement evidence/);
   assert.equal(routeTask({ task: "Perform a security-focused review of changed behavior or risky surfaces. Return JSON findings." }).taskClass, "security_audit");
   assert.equal(routeTask({ task: "Code review this PR. Review focus: security privilege automaton language equivalence.\ndiff --git a/Authz.java b/Authz.java" }).taskClass, "review_diff");
   assert.equal(routeTask({ task: "Create an implementation plan for a small PBI/requirement while preserving compatibility. Return JSON." }).taskClass, "needs_input_bypass");
