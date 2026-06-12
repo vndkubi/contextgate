@@ -332,6 +332,12 @@ function collectPromptSignals(task: string): string[] {
       /\b(?:base|target|head|source)\s*[:=]\s*[-A-Za-z0-9_./]+/i.test(task)) {
     signals.push("review:branch-pair");
   }
+  if (/\b[A-Z][A-Z0-9]+-\d+\b|\bjira\b|atlassian\.net\/browse\//i.test(task)) {
+    signals.push("business:jira");
+  }
+  if (/\bconfluence\b|\/wiki\/spaces\/|\/pages\/viewpage\.action/i.test(task)) {
+    signals.push("business:confluence");
+  }
   return [...new Set(signals)].slice(0, 16);
 }
 

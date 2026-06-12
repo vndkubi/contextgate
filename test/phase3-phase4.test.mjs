@@ -143,6 +143,8 @@ test("instruction graph planner emits root and path-specific files", () => {
   assert.match(reviewInstructions.content, /two phases/i);
   assert.match(reviewInstructions.content, /branch pair/);
   assert.match(reviewInstructions.content, /tokenopt_compile_evidence/);
+  assert.match(reviewInstructions.content, /Jira\/Confluence MCP tools/);
+  assert.match(reviewInstructions.content, /business\/test coverage review/);
   assert.match(reviewInstructions.content, /effective config\/policy math/);
   assert.match(reviewInstructions.content, /ISTQB dimensions/);
   assert.match(reviewInstructions.content, /user provides a review checklist/);

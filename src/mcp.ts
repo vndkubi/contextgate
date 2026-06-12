@@ -4309,6 +4309,7 @@ function buildAnswerContract(
           "Run review in two phases: first technical findings, then business/edge-case/test-design coverage gaps.",
           "If the user provides a review checklist, preserve every item and return item-by-item checklist coverage.",
           "If recall_probe facts are present, adjudicate each checked probe as a technical finding, coverage gap, or explicit non-issue with evidence; technical_finding_candidate=true with P1/P2 severity should be promoted unless contrary evidence disproves it.",
+          "If Jira tickets or Confluence pages/URLs are provided, use Jira/Confluence MCP evidence for business/test coverage; if unavailable, mark requirement evidence missing or assumption-based in notes.",
           "Prioritize correctness regressions, CI blockers, missing meaningful tests, and behavior changes over style.",
           "Before no-finding, check changed invariants, effective config/policy math, parser/encoding boundaries, backward compatibility, concurrency/async behavior, resource lifecycle, null/error paths, and call replacements.",
           "Apply ISTQB-style coverage dimensions where relevant: boundary values, equivalence partitions, negative/error cases, state transitions, concurrency/async, and compatibility/backward compatibility.",
@@ -4323,6 +4324,7 @@ function buildAnswerContract(
           "Technical findings and business/test coverage gaps are separated.",
           "User-provided checklist items are all answered with pass, fail, gap, or not_applicable and evidence.",
           "Checked recall probes with technical_finding_candidate=true are either promoted into technical findings or explicitly dismissed with contrary evidence.",
+          "Jira/Confluence requirement artifacts, when provided, are cited or explicitly marked unavailable before business coverage claims.",
           "No-finding decisions mention the invariant/config/compatibility/error-path dimensions checked when relevant.",
           "ISTQB dimensions are marked covered/gap/not_applicable when the user asks for business or edge-case coverage.",
           "Notes mention changed files, changed symbols, and call replacements from packet facts when present.",
@@ -4335,6 +4337,7 @@ function buildAnswerContract(
           "Fails quality if it drops the changed method/call evidence from the final review output.",
           "Fails quality if a user-provided checklist item is omitted or answered without evidence/status.",
           "Fails quality if it ignores or demotes a P1/P2 technical_finding_candidate recall_probe without contrary evidence.",
+          "Fails quality if Jira/Confluence artifacts are provided but business coverage is asserted without reading them or marking them unavailable.",
           "Fails quality if a likely regression is reported only as a missing-test or business coverage gap.",
           "Fails quality if it reviews the wrong branch, base, head, or per-commit intermediate state when PR scope is provided."
         ],
