@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   buildWorkflowPrompt,
   formatWorkflowMarkdown,
+  freshUsageTokens,
   scoreWorkflowResult,
   totalUsageTokens
 } from "../dist/workflow-ab-benchmark.js";
@@ -133,6 +134,7 @@ test("workflow A/B markdown reports token deltas", () => {
     exitCode: 0,
     durationMs: 100,
     finalAnswer: "{}",
+    usageStatus: "completed",
     toolCalls: 1,
     shellCalls: 1,
     mcpCalls: 0,
@@ -147,6 +149,7 @@ test("workflow A/B markdown reports token deltas", () => {
     testOutputPath: "/test.txt",
     testsPassed: true,
     changedFiles: ["src/a.ts"],
+    validationGeneratedFiles: [],
     diffShortStat: "1 file changed",
     diffStat: "src/a.ts | 1 +",
     diffPath: "/diff.patch",
@@ -174,8 +177,10 @@ test("workflow A/B markdown reports token deltas", () => {
   ]);
 
   assert.equal(totalUsageTokens({ input_tokens: 100, cached_input_tokens: 10, output_tokens: 20, reasoning_output_tokens: 30 }), 150);
+  assert.equal(freshUsageTokens({ input_tokens: 100, cached_input_tokens: 10, output_tokens: 20, reasoning_output_tokens: 30 }), 140);
   assert.match(markdown, /Compared to baseline/);
-  assert.match(markdown, /tokenopt saved 66\.7% vs baseline/);
-  assert.match(markdown, /tokenopt saved 50\.0% vs speckit/);
+  assert.match(markdown, /Raw total tokens: tokenopt=150, baseline=450, tokenopt saved 66\.7% vs baseline/);
+  assert.match(markdown, /Fresh total tokens: tokenopt=140, baseline=420, tokenopt saved 66\.7% vs baseline/);
+  assert.match(markdown, /Raw total tokens: tokenopt=150, speckit=300, tokenopt saved 50\.0% vs speckit/);
   assert.match(markdown, /Quality delta: tokenopt 1\.000 vs speckit 1\.000/);
 });

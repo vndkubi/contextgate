@@ -1,11 +1,13 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { totalUsageTokens } from "./token-estimator.js";
+import { freshUsageTokens, totalUsageTokens } from "./token-estimator.js";
 
-export { totalUsageTokens };
+export { freshUsageTokens, totalUsageTokens };
 
 type WorkflowMode = "baseline" | "tokenopt" | "speckit" | "speckit-tokenopt";
+type UsageStatus = "completed" | "timeout" | "missing";
+type McpMode = "lite" | "full";
 
 interface CodexUsage {
   input_tokens: number;
@@ -19,6 +21,7 @@ interface CodexRunMetrics {
   durationMs: number;
   finalAnswer: string;
   usage: CodexUsage;
+  usageStatus: UsageStatus;
   toolCalls: number;
   shellCalls: number;
   mcpCalls: number;
@@ -45,12 +48,14 @@ interface WorkflowBenchmarkOptions {
   rawDir: string;
   codexPackage: string;
   timeoutMs: number;
+  validationTimeoutMs: number;
   outPath?: string;
   markdownPath?: string;
   json: boolean;
   showAnswers: boolean;
   model?: string;
   testCommand?: string;
+  mcpMode: McpMode;
 }
 
 interface WorkflowQualityCheck {
@@ -78,6 +83,7 @@ interface WorkflowBenchmarkRow extends CodexRunMetrics {
   testOutputPath: string;
   testsPassed: boolean;
   changedFiles: string[];
+  validationGeneratedFiles: string[];
   diffShortStat: string;
   diffStat: string;
   diffPath: string;
@@ -256,30 +262,34 @@ export function scoreWorkflowResult(input: {
   };
 }
 
-export function formatWorkflowMarkdown(feature: WorkflowFeature, rows: WorkflowBenchmarkRow[], options?: { showAnswers?: boolean }): string {
+export function formatWorkflowMarkdown(feature: WorkflowFeature, rows: WorkflowBenchmarkRow[], options?: { showAnswers?: boolean; mcpMode?: McpMode; validationTimeoutMs?: number }): string {
   const lines: string[] = [
     "# Workflow A/B Benchmark",
     "",
     `Generated: ${new Date().toISOString()}`,
     `Feature: ${feature.id} - ${feature.title}`,
+    ...(options ? [`MCP mode: ${options.mcpMode ?? "n/a"}`, `Validation timeout: ${options.validationTimeoutMs ?? "n/a"} ms`] : []),
     "",
     "## Summary",
     "",
     formatMarkdownTable(
-      ["Workflow", "Quality", "Tests", "Input", "Cached", "Output", "Reasoning", "Total", "Tool", "MCP", "Shell", "Changed", "Duration"],
+      ["Workflow", "Quality", "Tests", "Usage", "Input", "Cached", "Output", "Reasoning", "Raw Total", "Fresh Total", "Tool", "MCP", "Shell", "Changed", "Generated", "Duration"],
       rows.map((row) => [
         row.workflow,
         `${row.qualityScore.toFixed(3)} (${row.qualityChecks})`,
         row.testsPassed ? "pass" : "fail",
-        String(row.usage.input_tokens),
-        String(row.usage.cached_input_tokens),
-        String(row.usage.output_tokens),
-        String(row.usage.reasoning_output_tokens),
-        String(totalUsageTokens(row.usage)),
+        row.usageStatus,
+        formatUsageValue(row, row.usage.input_tokens),
+        formatUsageValue(row, row.usage.cached_input_tokens),
+        formatUsageValue(row, row.usage.output_tokens),
+        formatUsageValue(row, row.usage.reasoning_output_tokens),
+        formatUsageValue(row, totalUsageTokens(row.usage)),
+        formatUsageValue(row, freshUsageTokens(row.usage)),
         String(row.toolCalls),
         String(row.mcpCalls),
         String(row.shellCalls),
         String(row.changedFiles.length),
+        String(row.validationGeneratedFiles.length),
         String(row.durationMs)
       ])
     ),
@@ -304,12 +314,16 @@ export function formatWorkflowMarkdown(feature: WorkflowFeature, rows: WorkflowB
       `- Diff stat: ${row.diffShortStat || "(no diff)"}`,
       `- Test command: ${row.testCommand ?? "(not configured)"}`,
       `- Test exit: ${row.testExitCode}`,
+      `- Usage status: ${row.usageStatus}`,
       "",
       "Quality checks:",
       ...row.qualityDetails.map((check) => `- ${check.passed ? "pass" : "fail"}: ${check.name}`),
       "",
       "Changed files:",
       ...(row.changedFiles.length > 0 ? row.changedFiles.map((file) => `- ${file}`) : ["- (none)"]),
+      "",
+      "Validation-generated files:",
+      ...(row.validationGeneratedFiles.length > 0 ? row.validationGeneratedFiles.map((file) => `- ${file}`) : ["- (none)"]),
       ""
     );
     if (options?.showAnswers) {
@@ -333,7 +347,6 @@ function runWorkflow(options: WorkflowBenchmarkOptions, workflow: WorkflowMode, 
     testCommand: options.testCommand
   });
   const run = runCodex(worktree, workflow, options, prompt);
-  const test = runValidation(worktree, options.testCommand ?? options.feature.testCommand, workflow, options.rawDir);
   const trackedDiffText = gitOutput(worktree, ["diff", baseCommit]);
   const untrackedFiles = listUntrackedFiles(worktree);
   const diffText = buildDiffWithUntracked(worktree, trackedDiffText, untrackedFiles);
@@ -342,6 +355,9 @@ function runWorkflow(options: WorkflowBenchmarkOptions, workflow: WorkflowMode, 
   const changedFiles = [...new Set([...listTrackedChangedFiles(worktree, baseCommit), ...untrackedFiles])];
   const diffShortStat = withUntrackedSummary(gitOutput(worktree, ["diff", "--shortstat", baseCommit]).trim(), untrackedFiles);
   const diffStat = withUntrackedSummary(gitOutput(worktree, ["diff", "--stat", baseCommit]).trim(), untrackedFiles);
+  const test = runValidation(worktree, options.testCommand ?? options.feature.testCommand, workflow, options.rawDir, options.validationTimeoutMs);
+  const postValidationChangedFiles = listChangedFiles(worktree, baseCommit);
+  const validationGeneratedFiles = postValidationChangedFiles.filter((file) => !changedFiles.includes(file));
 
   const partial = {
     ...run,
@@ -357,6 +373,7 @@ function runWorkflow(options: WorkflowBenchmarkOptions, workflow: WorkflowMode, 
     testOutputPath: test.outputPath,
     testsPassed: test.exitCode === 0,
     changedFiles,
+    validationGeneratedFiles,
     diffShortStat,
     diffStat,
     diffPath
@@ -378,7 +395,7 @@ function runWorkflow(options: WorkflowBenchmarkOptions, workflow: WorkflowMode, 
 function runCodex(
   worktree: string,
   workflow: WorkflowMode,
-  options: Pick<WorkflowBenchmarkOptions, "codexPackage" | "timeoutMs" | "model" | "rawDir">,
+  options: Pick<WorkflowBenchmarkOptions, "codexPackage" | "timeoutMs" | "model" | "rawDir" | "mcpMode">,
   prompt: string
 ): CodexRunMetrics {
   const start = Date.now();
@@ -406,7 +423,7 @@ function runCodex(
       "-c",
       "mcp_servers.tokenopt.command='node'",
       "-c",
-      `mcp_servers.tokenopt.args=['${slash(path.join(process.cwd(), "dist", "cli.js"))}','mcp','--mode','full']`
+      `mcp_servers.tokenopt.args=['${slash(path.join(process.cwd(), "dist", "cli.js"))}','mcp','--mode','${options.mcpMode}']`
     );
   }
   args.push("-");
@@ -425,11 +442,13 @@ function runCodex(
   fs.writeFileSync(rawLogPath, `${stdout}${stderr ? `\n--- STDERR ---\n${stderr}` : ""}${spawnError}`, "utf8");
   const parsed = parseCodexJsonl(stdout);
   const fileAnswer = fs.existsSync(lastMessagePath) ? fs.readFileSync(lastMessagePath, "utf8").trim() : "";
+  const timedOut = Boolean(result.error && /ETIMEDOUT|timed out/i.test(String(result.error)));
   return {
     exitCode: result.status,
     durationMs: Date.now() - start,
     finalAnswer: fileAnswer || parsed.finalAnswer,
     usage: parsed.usage,
+    usageStatus: parsed.usageCompleted ? "completed" : timedOut ? "timeout" : "missing",
     toolCalls: parsed.toolCalls,
     shellCalls: parsed.shellCalls,
     mcpCalls: parsed.mcpCalls,
@@ -441,7 +460,7 @@ function runCodex(
   };
 }
 
-function runValidation(cwd: string, command: string | undefined, workflow: WorkflowMode, rawDir: string): {
+function runValidation(cwd: string, command: string | undefined, workflow: WorkflowMode, rawDir: string, timeoutMs: number): {
   exitCode: number | null;
   durationMs: number;
   outputPath: string;
@@ -457,7 +476,7 @@ function runValidation(cwd: string, command: string | undefined, workflow: Workf
     encoding: "utf8",
     shell: true,
     maxBuffer: 128 * 1024 * 1024,
-    timeout: 300_000
+    timeout: timeoutMs
   });
   fs.writeFileSync(outputPath, `${result.stdout ?? ""}${result.stderr ? `\n--- STDERR ---\n${result.stderr}` : ""}${result.error ? `\n--- ERROR ---\n${String(result.error)}` : ""}`, "utf8");
   return { exitCode: result.status, durationMs: Date.now() - start, outputPath };
@@ -474,12 +493,14 @@ function parseOptions(args: string[]): WorkflowBenchmarkOptions {
   let baseRef = "HEAD";
   let codexPackage = CODEX_PACKAGE;
   let timeoutMs = 600_000;
+  let validationTimeoutMs = 300_000;
   let outPath: string | undefined;
   let markdownPath: string | undefined;
   let rawDir = path.resolve("benchmark-results", `workflow-ab-${Date.now()}`);
   let json = false;
   let showAnswers = false;
   let model: string | undefined;
+  let mcpMode: McpMode = "lite";
   const qualityRubric: string[] = [];
 
   for (let index = 0; index < args.length; index += 1) {
@@ -547,6 +568,19 @@ function parseOptions(args: string[]): WorkflowBenchmarkOptions {
       index += 1;
       continue;
     }
+    if (arg === "--validation-timeout-ms") {
+      validationTimeoutMs = Number.parseInt(requireValue(args, index, "--validation-timeout-ms"), 10);
+      if (!Number.isFinite(validationTimeoutMs) || validationTimeoutMs <= 0) {
+        throw new Error("--validation-timeout-ms must be a positive integer");
+      }
+      index += 1;
+      continue;
+    }
+    if (arg === "--mcp-mode") {
+      mcpMode = parseMcpMode(requireValue(args, index, "--mcp-mode"));
+      index += 1;
+      continue;
+    }
     if (arg === "--raw-dir") {
       rawDir = path.resolve(requireValue(args, index, "--raw-dir"));
       index += 1;
@@ -608,12 +642,14 @@ function parseOptions(args: string[]): WorkflowBenchmarkOptions {
     rawDir,
     codexPackage,
     timeoutMs,
+    validationTimeoutMs,
     outPath,
     markdownPath,
     json,
     showAnswers,
     model,
-    testCommand
+    testCommand,
+    mcpMode
   };
 }
 
@@ -643,6 +679,7 @@ function readFeatureFile(filePath: string): WorkflowFeature {
 function parseCodexJsonl(text: string): {
   finalAnswer: string;
   usage: CodexUsage;
+  usageCompleted: boolean;
   toolCalls: number;
   shellCalls: number;
   mcpCalls: number;
@@ -652,6 +689,7 @@ function parseCodexJsonl(text: string): {
 } {
   let finalAnswer = "";
   let usage: CodexUsage = { input_tokens: 0, cached_input_tokens: 0, output_tokens: 0, reasoning_output_tokens: 0 };
+  let usageCompleted = false;
   let toolCalls = 0;
   let shellCalls = 0;
   let mcpCalls = 0;
@@ -679,6 +717,7 @@ function parseCodexJsonl(text: string): {
       continue;
     }
     if (event.type === "turn.completed" && isRecord(event.usage)) {
+      usageCompleted = true;
       usage = {
         input_tokens: numberValue(event.usage.input_tokens),
         cached_input_tokens: numberValue(event.usage.cached_input_tokens),
@@ -706,7 +745,7 @@ function parseCodexJsonl(text: string): {
     }
   }
 
-  return { finalAnswer, usage, toolCalls, shellCalls, mcpCalls, toolInputChars, toolOutputChars, warnings };
+  return { finalAnswer, usage, usageCompleted, toolCalls, shellCalls, mcpCalls, toolInputChars, toolOutputChars, warnings };
 }
 
 function formatWorkflowRows(rows: WorkflowBenchmarkRow[], showAnswers: boolean): string {
@@ -714,6 +753,7 @@ function formatWorkflowRows(rows: WorkflowBenchmarkRow[], showAnswers: boolean):
     "Workflow",
     "Quality",
     "Tests",
+    "Usage",
     "Exit",
     "Tool",
     "MCP",
@@ -722,24 +762,29 @@ function formatWorkflowRows(rows: WorkflowBenchmarkRow[], showAnswers: boolean):
     "Cached",
     "Output tok",
     "Reason tok",
-    "Total tok",
+    "Raw tok",
+    "Fresh tok",
     "Changed",
+    "Generated",
     "Duration ms"
   ];
   const body = rows.map((row) => [
     row.workflow,
     `${row.qualityScore.toFixed(3)} ${row.qualityChecks}`,
     row.testsPassed ? "pass" : "fail",
+    row.usageStatus,
     String(row.exitCode),
     String(row.toolCalls),
     String(row.mcpCalls),
     String(row.shellCalls),
-    String(row.usage.input_tokens),
-    String(row.usage.cached_input_tokens),
-    String(row.usage.output_tokens),
-    String(row.usage.reasoning_output_tokens),
-    String(totalUsageTokens(row.usage)),
+    formatUsageValue(row, row.usage.input_tokens),
+    formatUsageValue(row, row.usage.cached_input_tokens),
+    formatUsageValue(row, row.usage.output_tokens),
+    formatUsageValue(row, row.usage.reasoning_output_tokens),
+    formatUsageValue(row, totalUsageTokens(row.usage)),
+    formatUsageValue(row, freshUsageTokens(row.usage)),
     String(row.changedFiles.length),
+    String(row.validationGeneratedFiles.length),
     String(row.durationMs)
   ]);
   const table = [header, ...body];
@@ -765,10 +810,11 @@ function formatTokenComparison(rows: WorkflowBenchmarkRow[]): string[] {
     for (const row of rows.filter((candidate) => candidate.workflow !== "baseline")) {
       lines.push(
         `${row.workflow}:`,
-        formatDeltaLine("Input tokens", row.workflow, row.usage.input_tokens, "baseline", baseline.usage.input_tokens),
-        formatDeltaLine("Output tokens", row.workflow, row.usage.output_tokens, "baseline", baseline.usage.output_tokens),
-        formatDeltaLine("Reasoning tokens", row.workflow, row.usage.reasoning_output_tokens, "baseline", baseline.usage.reasoning_output_tokens),
-        formatDeltaLine("Total tokens", row.workflow, totalUsageTokens(row.usage), "baseline", totalUsageTokens(baseline.usage)),
+        formatUsageDeltaLine("Input tokens", row, row.usage.input_tokens, baseline, baseline.usage.input_tokens),
+        formatUsageDeltaLine("Output tokens", row, row.usage.output_tokens, baseline, baseline.usage.output_tokens),
+        formatUsageDeltaLine("Reasoning tokens", row, row.usage.reasoning_output_tokens, baseline, baseline.usage.reasoning_output_tokens),
+        formatUsageDeltaLine("Raw total tokens", row, totalUsageTokens(row.usage), baseline, totalUsageTokens(baseline.usage)),
+        formatUsageDeltaLine("Fresh total tokens", row, freshUsageTokens(row.usage), baseline, freshUsageTokens(baseline.usage)),
         `Quality delta: ${row.workflow} ${row.qualityScore.toFixed(3)} vs baseline ${baseline.qualityScore.toFixed(3)}.`,
         `Tool calls: ${row.workflow} ${row.toolCalls} vs baseline ${baseline.toolCalls}; MCP ${row.mcpCalls} vs ${baseline.mcpCalls}; shell ${row.shellCalls} vs ${baseline.shellCalls}.`,
         ""
@@ -780,10 +826,11 @@ function formatTokenComparison(rows: WorkflowBenchmarkRow[]): string[] {
   }
   lines.push(
     "TokenOpt vs SpecKit:",
-    formatDeltaLine("Input tokens", "tokenopt", tokenopt.usage.input_tokens, "speckit", speckit.usage.input_tokens),
-    formatDeltaLine("Output tokens", "tokenopt", tokenopt.usage.output_tokens, "speckit", speckit.usage.output_tokens),
-    formatDeltaLine("Reasoning tokens", "tokenopt", tokenopt.usage.reasoning_output_tokens, "speckit", speckit.usage.reasoning_output_tokens),
-    formatDeltaLine("Total tokens", "tokenopt", totalUsageTokens(tokenopt.usage), "speckit", totalUsageTokens(speckit.usage)),
+    formatUsageDeltaLine("Input tokens", tokenopt, tokenopt.usage.input_tokens, speckit, speckit.usage.input_tokens),
+    formatUsageDeltaLine("Output tokens", tokenopt, tokenopt.usage.output_tokens, speckit, speckit.usage.output_tokens),
+    formatUsageDeltaLine("Reasoning tokens", tokenopt, tokenopt.usage.reasoning_output_tokens, speckit, speckit.usage.reasoning_output_tokens),
+    formatUsageDeltaLine("Raw total tokens", tokenopt, totalUsageTokens(tokenopt.usage), speckit, totalUsageTokens(speckit.usage)),
+    formatUsageDeltaLine("Fresh total tokens", tokenopt, freshUsageTokens(tokenopt.usage), speckit, freshUsageTokens(speckit.usage)),
     `Quality delta: tokenopt ${tokenopt.qualityScore.toFixed(3)} vs speckit ${speckit.qualityScore.toFixed(3)}.`,
     `Test result: tokenopt ${tokenopt.testsPassed ? "pass" : "fail"}, speckit ${speckit.testsPassed ? "pass" : "fail"}.`
   );
@@ -791,29 +838,44 @@ function formatTokenComparison(rows: WorkflowBenchmarkRow[]): string[] {
     lines.push(
       "",
       "Hybrid vs SpecKit:",
-      formatDeltaLine("Input tokens", "speckit-tokenopt", hybrid.usage.input_tokens, "speckit", speckit.usage.input_tokens),
-      formatDeltaLine("Output tokens", "speckit-tokenopt", hybrid.usage.output_tokens, "speckit", speckit.usage.output_tokens),
-      formatDeltaLine("Reasoning tokens", "speckit-tokenopt", hybrid.usage.reasoning_output_tokens, "speckit", speckit.usage.reasoning_output_tokens),
-      formatDeltaLine("Total tokens", "speckit-tokenopt", totalUsageTokens(hybrid.usage), "speckit", totalUsageTokens(speckit.usage)),
+      formatUsageDeltaLine("Input tokens", hybrid, hybrid.usage.input_tokens, speckit, speckit.usage.input_tokens),
+      formatUsageDeltaLine("Output tokens", hybrid, hybrid.usage.output_tokens, speckit, speckit.usage.output_tokens),
+      formatUsageDeltaLine("Reasoning tokens", hybrid, hybrid.usage.reasoning_output_tokens, speckit, speckit.usage.reasoning_output_tokens),
+      formatUsageDeltaLine("Raw total tokens", hybrid, totalUsageTokens(hybrid.usage), speckit, totalUsageTokens(speckit.usage)),
+      formatUsageDeltaLine("Fresh total tokens", hybrid, freshUsageTokens(hybrid.usage), speckit, freshUsageTokens(speckit.usage)),
       `Quality delta: speckit-tokenopt ${hybrid.qualityScore.toFixed(3)} vs speckit ${speckit.qualityScore.toFixed(3)}.`,
       "",
       "Hybrid vs TokenOpt:",
-      formatDeltaLine("Input tokens", "speckit-tokenopt", hybrid.usage.input_tokens, "tokenopt", tokenopt.usage.input_tokens),
-      formatDeltaLine("Output tokens", "speckit-tokenopt", hybrid.usage.output_tokens, "tokenopt", tokenopt.usage.output_tokens),
-      formatDeltaLine("Reasoning tokens", "speckit-tokenopt", hybrid.usage.reasoning_output_tokens, "tokenopt", tokenopt.usage.reasoning_output_tokens),
-      formatDeltaLine("Total tokens", "speckit-tokenopt", totalUsageTokens(hybrid.usage), "tokenopt", totalUsageTokens(tokenopt.usage)),
+      formatUsageDeltaLine("Input tokens", hybrid, hybrid.usage.input_tokens, tokenopt, tokenopt.usage.input_tokens),
+      formatUsageDeltaLine("Output tokens", hybrid, hybrid.usage.output_tokens, tokenopt, tokenopt.usage.output_tokens),
+      formatUsageDeltaLine("Reasoning tokens", hybrid, hybrid.usage.reasoning_output_tokens, tokenopt, tokenopt.usage.reasoning_output_tokens),
+      formatUsageDeltaLine("Raw total tokens", hybrid, totalUsageTokens(hybrid.usage), tokenopt, totalUsageTokens(tokenopt.usage)),
+      formatUsageDeltaLine("Fresh total tokens", hybrid, freshUsageTokens(hybrid.usage), tokenopt, freshUsageTokens(tokenopt.usage)),
       `Quality delta: speckit-tokenopt ${hybrid.qualityScore.toFixed(3)} vs tokenopt ${tokenopt.qualityScore.toFixed(3)}.`
     );
   }
   return lines;
 }
 
-function formatDeltaLine(label: string, leftName: string, leftValue: number, rightName: string, rightValue: number): string {
+function formatUsageValue(row: Pick<WorkflowBenchmarkRow, "usageStatus">, value: number): string {
+  return row.usageStatus === "completed" ? String(value) : "n/a";
+}
+
+function formatUsageDeltaLine(
+  label: string,
+  left: Pick<WorkflowBenchmarkRow, "workflow" | "usageStatus">,
+  leftValue: number,
+  right: Pick<WorkflowBenchmarkRow, "workflow" | "usageStatus">,
+  rightValue: number
+): string {
+  if (left.usageStatus !== "completed" || right.usageStatus !== "completed") {
+    return `- ${label}: ${left.workflow}=${formatUsageValue(left, leftValue)}, ${right.workflow}=${formatUsageValue(right, rightValue)}, delta unavailable (${left.workflow} usage=${left.usageStatus}, ${right.workflow} usage=${right.usageStatus}).`;
+  }
   if (rightValue <= 0) {
-    return `- ${label}: ${leftName}=${leftValue}, ${rightName}=${rightValue}, delta unavailable.`;
+    return `- ${label}: ${left.workflow}=${leftValue}, ${right.workflow}=${rightValue}, delta unavailable.`;
   }
   const saved = 1 - leftValue / rightValue;
-  return `- ${label}: ${leftName}=${leftValue}, ${rightName}=${rightValue}, ${leftName} ${saved >= 0 ? "saved" : "spent"} ${Math.abs(saved * 100).toFixed(1)}% vs ${rightName}.`;
+  return `- ${label}: ${left.workflow}=${leftValue}, ${right.workflow}=${rightValue}, ${left.workflow} ${saved >= 0 ? "saved" : "spent"} ${Math.abs(saved * 100).toFixed(1)}% vs ${right.workflow}.`;
 }
 
 function formatMarkdownTable(header: string[], rows: string[][]): string {
@@ -858,6 +920,13 @@ function parseWorkflow(value: string): WorkflowMode {
   throw new Error(`Unknown workflow: ${value}`);
 }
 
+function parseMcpMode(value: string): McpMode {
+  if (value === "lite" || value === "full") {
+    return value;
+  }
+  throw new Error(`Unknown MCP mode: ${value}`);
+}
+
 function requireValue(args: string[], index: number, flag: string): string {
   const value = args[index + 1];
   if (!value) {
@@ -883,6 +952,10 @@ function listTrackedChangedFiles(cwd: string, baseCommit: string): string[] {
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter(Boolean);
+}
+
+function listChangedFiles(cwd: string, baseCommit: string): string[] {
+  return [...new Set([...listTrackedChangedFiles(cwd, baseCommit), ...listUntrackedFiles(cwd)])];
 }
 
 function listUntrackedFiles(cwd: string): string[] {
@@ -939,7 +1012,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function workflowBenchmarkHelp(): string {
   return `Usage:
-  tokenopt benchmark workflow-ab --repo <path> --feature-file <json|txt> [--workflow baseline,tokenopt,speckit,speckit-tokenopt] [--base-ref HEAD] [--test-command <command>] [--out <json>] [--markdown <md>] [--show-answers]
+  tokenopt benchmark workflow-ab --repo <path> --feature-file <json|txt> [--workflow baseline,tokenopt,speckit,speckit-tokenopt] [--base-ref HEAD] [--test-command <command>] [--mcp-mode lite|full] [--validation-timeout-ms 300000] [--out <json>] [--markdown <md>] [--show-answers]
 
 Feature JSON:
   {
@@ -949,5 +1022,10 @@ Feature JSON:
     "qualityRubric": ["expected behavior", "targeted validation"],
     "testCommand": "npm test"
   }
+
+Token usage:
+  raw total = input + output + reasoning.
+  fresh total = input - cached input + output + reasoning.
+  Timed-out or missing usage is reported as unavailable instead of zero.
 `;
 }

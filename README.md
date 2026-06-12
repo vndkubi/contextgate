@@ -198,6 +198,10 @@ node dist/cli.js benchmark workflow-ab --repo <target-repo> --feature-file <feat
 
 This runner creates isolated git worktrees from the same base commit, runs the feature with baseline Codex instructions, TokenOpt evidence-first instructions, Spec Kit style specify/plan/tasks/implement instructions, and an optional hybrid Spec Kit + TokenOpt evidence-gate workflow, parses real Codex usage, runs the configured validation command, and reports token burn, diff stats, changed files, quality checks, and raw log paths.
 
+For TokenOpt workflows, the implementation benchmark uses `--mcp-mode lite` by default to avoid measuring full MCP tool-schema overhead when the prompt only needs `tokenopt_compile_evidence`, `tokenopt_search`, and `tokenopt_read_file`. Use `--mcp-mode full` when you intentionally want command execution, project facts, Java diff helpers, business contract, impact analysis, or symbol/test-neighbor helper tools exposed during the agent run.
+
+The workflow A/B report separates `raw total` tokens (`input + output + reasoning`) from `fresh total` tokens (`input - cached input + output + reasoning`). If Codex times out before a `turn.completed` usage event, the report marks usage as `timeout` and token deltas as unavailable instead of treating missing usage as zero. The diff and changed-file score are captured before validation runs, while files created by Maven/Gradle/test execution are reported separately as validation-generated files.
+
 Modes:
 
 ```text

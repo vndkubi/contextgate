@@ -81,3 +81,8 @@ export function estimateTokensSaved(
 export function totalUsageTokens(usage: BenchmarkUsageTokens): number {
   return usage.input_tokens + usage.output_tokens + usage.reasoning_output_tokens;
 }
+
+export function freshUsageTokens(usage: BenchmarkUsageTokens): number {
+  const cached = usage.cached_input_tokens ?? 0;
+  return Math.max(0, usage.input_tokens - cached) + usage.output_tokens + usage.reasoning_output_tokens;
+}
