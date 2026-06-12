@@ -200,6 +200,10 @@ This runner creates isolated git worktrees from the same base commit, runs the f
 
 For TokenOpt workflows, the implementation benchmark uses `--mcp-mode lite` by default to avoid measuring full MCP tool-schema overhead when the prompt only needs `tokenopt_compile_evidence`, `tokenopt_search`, and `tokenopt_read_file`. Use `--mcp-mode full` when you intentionally want command execution, project facts, Java diff helpers, business contract, impact analysis, or symbol/test-neighbor helper tools exposed during the agent run.
 
+The TokenOpt workflow is adaptive rather than MCP-mandatory. If a feature is exact and small, such as a known command/class/test surface with a targeted validation command, the correct TokenOpt behavior is to bypass MCP-first and use bounded native search/read. The final JSON should report `acquisition_mode=tokenopt_bypass` or `speckit_tokenopt_bypass` for that case. Use MCP evidence only when it replaces broad repository discovery, business/domain synthesis, unknown ownership discovery, or cross-module impact analysis.
+
+The implementation benchmark also supports `--workflow tokenopt-prompt-chain` to measure the native TokenOpt prompt-pack path as one implementation run: requirement analysis/investigate PBI, PBI plan, then implement feature. This is useful when comparing prompt-pack usage against `baseline`, `speckit`, `tokenopt`, and `speckit-tokenopt` on the same PBI.
+
 The workflow A/B report separates `raw total` tokens (`input + output + reasoning`) from `fresh total` tokens (`input - cached input + output + reasoning`). If Codex times out before a `turn.completed` usage event, the report marks usage as `timeout` and token deltas as unavailable instead of treating missing usage as zero. The diff and changed-file score are captured before validation runs, while files created by Maven/Gradle/test execution are reported separately as validation-generated files.
 
 Modes:

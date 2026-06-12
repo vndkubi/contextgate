@@ -5,7 +5,7 @@ import { freshUsageTokens, totalUsageTokens } from "./token-estimator.js";
 
 export { freshUsageTokens, totalUsageTokens };
 
-type WorkflowMode = "baseline" | "tokenopt" | "speckit" | "speckit-tokenopt";
+type WorkflowMode = "baseline" | "tokenopt" | "speckit" | "speckit-tokenopt" | "tokenopt-prompt-chain";
 type UsageStatus = "completed" | "timeout" | "missing";
 type McpMode = "lite" | "full";
 
@@ -143,7 +143,8 @@ export function buildWorkflowPrompt(input: {
   const outputContract = [
     "Return compact JSON only with:",
     "{",
-    '  "workflow": "baseline|tokenopt|speckit|speckit-tokenopt",',
+    '  "workflow": "baseline|tokenopt|speckit|speckit-tokenopt|tokenopt-prompt-chain",',
+    '  "acquisition_mode": "native_bounded|tokenopt_bypass|tokenopt_mcp|speckit|speckit_tokenopt_bypass|speckit_tokenopt_mcp|tokenopt_prompt_chain_bypass|tokenopt_prompt_chain_mcp",',
     '  "changed_files": [],',
     '  "tests_run": [],',
     '  "tests_passed": true,',
@@ -190,10 +191,14 @@ export function buildWorkflowPrompt(input: {
     return [
       "Workflow: tokenopt",
       "",
-      "Use TokenOpt as the acquisition gate before broad exploration.",
-      "First call tokenopt_compile_evidence with task_type=implement, cwd set to the repository root, budget_tokens around 1600, and task set to the full feature request.",
+      "Use TokenOpt adaptively as a cost gate, not as mandatory overhead.",
+      "Before any MCP call, classify whether TokenOpt will replace broad exploration or add an extra hop.",
+      "Bypass TokenOpt and set acquisition_mode=tokenopt_bypass when the task is exact/small: the owning module, command, class, file family, or validation test is already clear; expected edits look limited to one or two source/test areas; and native bounded search/read is enough.",
+      "Use native bounded shell/search/read directly for a bypassed exact/small task. Keep exploration tight and avoid repo-wide scans.",
+      "Call tokenopt_compile_evidence only when the task needs broad repository discovery, business/domain synthesis, unknown ownership, or cross-module impact analysis.",
+      "When calling tokenopt_compile_evidence, pass task_type=implement, cwd set to the repository root, budget_tokens around 1200, and task set only to the text under Feature request. Do not include this benchmark wrapper, quality rubric, test command, or output contract in the MCP task.",
       "If the packet is answerable, implement from the packet and do not repeat broad repo exploration.",
-      "If the packet has missing exact evidence, use only narrow follow-up reads/searches for named files, symbols, tests, or commands.",
+      "If the packet has missing exact evidence, use only the allowed narrow follow-up reads/searches for named files, symbols, tests, or commands.",
       "After ownership is known, edit only the narrow files required and run targeted validation.",
       "",
       ...common
@@ -204,12 +209,40 @@ export function buildWorkflowPrompt(input: {
     return [
       "Workflow: speckit-tokenopt",
       "",
-      "Use a Spec Kit style spec-driven workflow, but use TokenOpt as the repository evidence gate.",
+      "Use a Spec Kit style spec-driven workflow, with TokenOpt only when it replaces broad repository discovery.",
       "Phase 1 - specify: write concise local spec artifacts for the requested behavior before editing code.",
-      "Phase 2 - plan: call tokenopt_compile_evidence exactly once with task_type=implement, cwd set to the repository root, budget_tokens around 1600, and task set to the full feature request.",
-      "Phase 3 - tasks: derive implementation tasks from the spec plus TokenOpt packet facts. If the packet is answerable, do not repeat broad shell/search exploration.",
+      "Phase 2 - plan: decide whether TokenOpt is useful. Bypass TokenOpt and set acquisition_mode=speckit_tokenopt_bypass when the spec points to an exact/small implementation surface and native bounded search/read is cheaper.",
+      "If TokenOpt is useful, call tokenopt_compile_evidence once with task_type=implement, cwd set to the repository root, budget_tokens around 1200, and task set only to the text under Feature request. Do not include this benchmark wrapper, quality rubric, test command, or output contract in the MCP task.",
+      "Phase 3 - tasks: derive implementation tasks from the spec plus either TokenOpt packet facts or the bounded native evidence used for bypass. If the packet is answerable, do not repeat broad shell/search exploration.",
       "Phase 4 - implement: edit only exact files/symbols/tests from the plan, then run targeted validation.",
       "Create local spec artifacts under specs/workflow-ab-<feature-id>/spec.md, plan.md, and tasks.md unless equivalent artifacts already exist.",
+      "",
+      ...common
+    ].join("\n");
+  }
+
+  if (input.workflow === "tokenopt-prompt-chain") {
+    return [
+      "Workflow: tokenopt-prompt-chain",
+      "",
+      "Use the TokenOpt native prompt-pack workflow in three compact phases, then implement the feature in this same run.",
+      "Phase 1 - investigate-pbi / requirement-analysis:",
+      "- Analyze the Feature request into WHAT, WHY, HOW, acceptance criteria, impacted areas, tests, and unknowns.",
+      "- If the requirement text is missing, stop and ask for it. In this benchmark the Feature request is the concrete requirement artifact.",
+      "Phase 2 - pbi-plan:",
+      "- Create a compatibility-preserving implementation plan with impacted areas, target files, tests, compatibility risks, and missing items.",
+      "Phase 3 - implement-feature:",
+      "- Implement the smallest safe code change only after the plan identifies target files.",
+      "- Add or update targeted tests and run the configured validation command.",
+      "",
+      "TokenOpt routing:",
+      "- Choose the cheapest evidence path first.",
+      "- If the owning command/module/file family is clear from the PBI, bypass MCP-first and set acquisition_mode=tokenopt_prompt_chain_bypass.",
+      "- If ownership is unknown or broad cross-module evidence is needed, call tokenopt_compile_evidence once with task_type=implement, cwd set to the repository root, budget_tokens around 1200, and task set only to the Feature request text.",
+      "- Do not use TokenOpt first and then repeat the same evidence acquisition with broad shell/search/read.",
+      "- Keep followups exact and bounded.",
+      "",
+      "Do not create Spec Kit artifacts for this prompt-chain run.",
       "",
       ...common
     ].join("\n");
@@ -244,7 +277,7 @@ export function scoreWorkflowResult(input: {
     checks.push({ name: "speckit_artifacts_created", passed: input.row.changedFiles.some((file) => /^specs\/workflow-ab-[^/]+\/(?:spec|plan|tasks)\.md$/i.test(file.replace(/\\/g, "/"))) });
   }
   if (input.row.workflow === "speckit-tokenopt") {
-    checks.push({ name: "hybrid_used_tokenopt_mcp", passed: input.row.mcpCalls > 0 });
+    checks.push({ name: "hybrid_followed_tokenopt_policy", passed: input.row.mcpCalls > 0 || /"acquisition_mode"\s*:\s*"speckit_tokenopt_bypass"/i.test(input.row.finalAnswer) });
   }
   for (const item of input.feature.qualityRubric) {
     const validationPassed = /\b(validation|validate|passes?|passed)\b/i.test(item) && input.row.testsPassed;
@@ -418,7 +451,7 @@ function runCodex(
   if (options.model) {
     args.push("-m", options.model);
   }
-  if (workflow === "tokenopt" || workflow === "speckit-tokenopt") {
+  if (workflow === "tokenopt" || workflow === "speckit-tokenopt" || workflow === "tokenopt-prompt-chain") {
     args.push(
       "-c",
       "mcp_servers.tokenopt.command='node'",
@@ -914,7 +947,7 @@ function normalizeRubricText(value: string): string {
 }
 
 function parseWorkflow(value: string): WorkflowMode {
-  if (value === "baseline" || value === "tokenopt" || value === "speckit" || value === "speckit-tokenopt") {
+  if (value === "baseline" || value === "tokenopt" || value === "speckit" || value === "speckit-tokenopt" || value === "tokenopt-prompt-chain") {
     return value;
   }
   throw new Error(`Unknown workflow: ${value}`);
@@ -1012,7 +1045,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function workflowBenchmarkHelp(): string {
   return `Usage:
-  tokenopt benchmark workflow-ab --repo <path> --feature-file <json|txt> [--workflow baseline,tokenopt,speckit,speckit-tokenopt] [--base-ref HEAD] [--test-command <command>] [--mcp-mode lite|full] [--validation-timeout-ms 300000] [--out <json>] [--markdown <md>] [--show-answers]
+  tokenopt benchmark workflow-ab --repo <path> --feature-file <json|txt> [--workflow baseline,tokenopt,speckit,speckit-tokenopt,tokenopt-prompt-chain] [--base-ref HEAD] [--test-command <command>] [--mcp-mode lite|full] [--validation-timeout-ms 300000] [--out <json>] [--markdown <md>] [--show-answers]
 
 Feature JSON:
   {

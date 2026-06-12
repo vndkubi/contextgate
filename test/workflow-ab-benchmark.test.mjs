@@ -35,8 +35,11 @@ test("workflow A/B prompts encode tokenopt and speckit acquisition rules", () =>
     worktree: "/repo-tokenopt",
     testCommand: "npm test"
   });
+  assert.match(tokenoptPrompt, /Use TokenOpt adaptively as a cost gate/i);
+  assert.match(tokenoptPrompt, /Bypass TokenOpt/i);
   assert.match(tokenoptPrompt, /tokenopt_compile_evidence/);
   assert.match(tokenoptPrompt, /task_type=implement/);
+  assert.match(tokenoptPrompt, /task set only to the text under Feature request/i);
   assert.match(tokenoptPrompt, /do not repeat broad repo exploration/i);
   assert.match(tokenoptPrompt, /npm test/);
 
@@ -59,9 +62,24 @@ test("workflow A/B prompts encode tokenopt and speckit acquisition rules", () =>
     testCommand: "npm test"
   });
   assert.match(hybridPrompt, /Spec Kit style spec-driven workflow/i);
-  assert.match(hybridPrompt, /TokenOpt as the repository evidence gate/i);
-  assert.match(hybridPrompt, /tokenopt_compile_evidence exactly once/);
+  assert.match(hybridPrompt, /TokenOpt only when it replaces broad repository discovery/i);
+  assert.match(hybridPrompt, /Bypass TokenOpt/i);
+  assert.match(hybridPrompt, /tokenopt_compile_evidence once/);
   assert.match(hybridPrompt, /do not repeat broad shell\/search exploration/i);
+
+  const promptChainPrompt = buildWorkflowPrompt({
+    workflow: "tokenopt-prompt-chain",
+    feature,
+    repo: "/repo",
+    worktree: "/repo-prompt-chain",
+    testCommand: "npm test"
+  });
+  assert.match(promptChainPrompt, /requirement-analysis/i);
+  assert.match(promptChainPrompt, /pbi-plan/i);
+  assert.match(promptChainPrompt, /implement-feature/i);
+  assert.match(promptChainPrompt, /tokenopt_prompt_chain_bypass/i);
+  assert.match(promptChainPrompt, /task set only to the Feature request text/i);
+  assert.match(promptChainPrompt, /Do not create Spec Kit artifacts/i);
 });
 
 test("workflow A/B scoring combines validation, diff, and rubric evidence", () => {
@@ -101,7 +119,7 @@ test("workflow A/B scoring does not trust claimed speckit artifacts without diff
   assert.equal(quality.checks.find((check) => check.name === "speckit_artifacts_created").passed, false);
 });
 
-test("workflow A/B scoring requires hybrid TokenOpt evidence and real spec artifacts", () => {
+test("workflow A/B scoring accepts hybrid TokenOpt evidence or explicit bypass with real spec artifacts", () => {
   const quality = scoreWorkflowResult({
     feature,
     row: {
@@ -121,7 +139,26 @@ test("workflow A/B scoring requires hybrid TokenOpt evidence and real spec artif
   });
 
   assert.equal(quality.checks.find((check) => check.name === "speckit_artifacts_created").passed, true);
-  assert.equal(quality.checks.find((check) => check.name === "hybrid_used_tokenopt_mcp").passed, true);
+  assert.equal(quality.checks.find((check) => check.name === "hybrid_followed_tokenopt_policy").passed, true);
+
+  const bypassQuality = scoreWorkflowResult({
+    feature,
+    row: {
+      exitCode: 0,
+      testsPassed: true,
+      changedFiles: [
+        "src/token-estimator.ts",
+        "test/token-estimator.test.mjs",
+        "specs/workflow-ab-token-helper/spec.md"
+      ],
+      diffShortStat: "3 files changed, 20 insertions(+)",
+      finalAnswer: '{"acquisition_mode":"speckit_tokenopt_bypass","tests_run":["npm test"],"tests_passed":true}',
+      workflow: "speckit-tokenopt",
+      mcpCalls: 0
+    },
+    diffText: "export function totalUsageTokens() {}\n// total token helper\n// targeted validation"
+  });
+  assert.equal(bypassQuality.checks.find((check) => check.name === "hybrid_followed_tokenopt_policy").passed, true);
 });
 
 test("workflow A/B markdown reports token deltas", () => {
