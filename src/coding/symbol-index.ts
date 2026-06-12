@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { CodingSymbol, SymbolPacket } from "../types.js";
 import { findTestNeighbors } from "./test-neighbors.js";
+import { loadOrBuildSymbolIndex, type SymbolIndexSnapshot } from "./symbol-index-persistent.js";
 
 export interface SymbolSearchInput {
   repoRoot: string;
@@ -15,6 +16,13 @@ export interface SymbolPacketInput {
   repoRoot: string;
   symbolId?: string;
   query?: string;
+}
+
+export interface CodingSymbolIndexStats {
+  cacheHit: boolean;
+  cachePath: string;
+  fileCount: number;
+  symbolCount: number;
 }
 
 const SOURCE_EXTENSIONS = new Set([".ts", ".tsx", ".js", ".jsx", ".java", ".py"]);
@@ -52,8 +60,7 @@ const CONTROL_WORDS = new Set([
 export function findCodingSymbols(input: SymbolSearchInput): CodingSymbol[] {
   const query = input.query?.trim() ?? "";
   const queryTokens = tokenizeQuery(query);
-  const symbols = collectCodingFiles(input.repoRoot)
-    .flatMap((file) => extractSymbolsFromFile(input.repoRoot, file))
+  const symbols = loadCodingSymbolIndex(input.repoRoot).symbols
     .filter((symbol) => !input.language || symbol.language === input.language)
     .filter((symbol) => !input.kind || symbol.kind === input.kind)
     .map((symbol) => ({ symbol, score: scoreSymbol(symbol, query, queryTokens) }))
@@ -65,6 +72,20 @@ export function findCodingSymbols(input: SymbolSearchInput): CodingSymbol[] {
     ...symbol,
     confidence: Math.max(symbol.confidence, Math.min(0.96, 0.35 + score / 10))
   }));
+}
+
+export function loadCodingSymbolIndex(repoRoot: string): SymbolIndexSnapshot {
+  return loadCodingSymbolIndexResult(repoRoot).snapshot;
+}
+
+export function getCodingSymbolIndexStats(repoRoot: string, options: { forceRebuild?: boolean } = {}): CodingSymbolIndexStats {
+  const result = loadCodingSymbolIndexResult(repoRoot, options);
+  return {
+    cacheHit: result.cacheHit,
+    cachePath: result.cachePath,
+    fileCount: result.snapshot.files.length,
+    symbolCount: result.snapshot.symbols.length
+  };
 }
 
 export function buildSymbolPacket(input: SymbolPacketInput): SymbolPacket | undefined {
@@ -169,6 +190,33 @@ export function isTestPath(filePath: string): boolean {
   const normalized = filePath.replace(/\\/g, "/");
   const base = path.basename(normalized);
   return /(^|\/)(test|tests|__tests__|spec|src\/test|qa)(\/|$)/i.test(normalized) || /\.(test|spec)\.[cm]?[jt]sx?$/i.test(base) || /Test\.(java|kt)$/i.test(base) || /^test_.*\.py$/i.test(base);
+}
+
+function loadCodingSymbolIndexResult(repoRoot: string, options: { forceRebuild?: boolean } = {}) {
+  return loadOrBuildSymbolIndex(repoRoot, () => buildCodingSymbolIndex(repoRoot), options);
+}
+
+function buildCodingSymbolIndex(repoRoot: string): Omit<SymbolIndexSnapshot, "version" | "repoFingerprint" | "createdAt"> {
+  const files = collectCodingFiles(repoRoot);
+  const indexedFiles = files.map((file) => {
+    const symbols = extractSymbolsFromFile(repoRoot, file);
+    const stat = safeStat(path.join(repoRoot, file));
+    return {
+      file,
+      symbols,
+      indexed: {
+        path: file,
+        size: stat?.size ?? 0,
+        mtimeMs: stat?.mtimeMs ?? 0,
+        language: languageForPath(file),
+        symbolCount: symbols.length
+      }
+    };
+  });
+  return {
+    files: indexedFiles.map((entry) => entry.indexed),
+    symbols: indexedFiles.flatMap((entry) => entry.symbols)
+  };
 }
 
 export function tokenizeQuery(query: string): string[] {
@@ -408,6 +456,14 @@ function safeReadLines(filePath: string): string[] {
     return fs.readFileSync(filePath, "utf8").replace(/\r\n/g, "\n").split("\n");
   } catch {
     return [];
+  }
+}
+
+function safeStat(filePath: string): fs.Stats | undefined {
+  try {
+    return fs.statSync(filePath);
+  } catch {
+    return undefined;
   }
 }
 

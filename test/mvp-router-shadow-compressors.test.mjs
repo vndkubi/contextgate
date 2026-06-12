@@ -8,21 +8,38 @@ import { writeEvidenceTaskState } from "../dist/evidence-state.js";
 import { compressText } from "../dist/log-compressor.js";
 import { readRepoEvents } from "../dist/observability.js";
 import { evaluatePolicy } from "../dist/policy-core.js";
+import { getPlaybook, listPlaybooks } from "../dist/playbooks.js";
 import { routeTask } from "../dist/router.js";
 
 test("router classifies review, debug, refactor, exact, and small-repo bypass tasks", () => {
   assert.equal(routeTask({ task: "Review this PR diff for changed files" }).taskClass, "needs_input_bypass");
   assert.equal(routeTask({ task: "Review this diff:\ndiff --git a/src/orders/OrderService.ts b/src/orders/OrderService.ts" }).taskClass, "review_diff");
   assert.equal(routeTask({ task: "Perform a security-focused review of changed behavior or risky surfaces. Return JSON findings." }).taskClass, "security_audit");
+  assert.equal(routeTask({ task: "Code review this PR. Review focus: security privilege automaton language equivalence.\ndiff --git a/Authz.java b/Authz.java" }).taskClass, "review_diff");
   assert.equal(routeTask({ task: "Create an implementation plan for a small PBI/requirement while preserving compatibility. Return JSON." }).taskClass, "needs_input_bypass");
   assert.equal(routeTask({ task: "Analyze a requirement and produce WHAT, WHY, HOW, acceptance criteria, impacted areas, tests, and unknowns. Return JSON." }).taskClass, "needs_input_bypass");
   assert.equal(routeTask({ task: "Write a unit-test plan for the likely owning class/module of a behavior. Return JSON." }).taskClass, "needs_input_bypass");
   assert.equal(routeTask({ task: "Identify what should be promoted into review memory after a completed task. Return JSON." }).taskClass, "needs_input_bypass");
-  assert.equal(routeTask({ task: "Debug this Spring stack trace Caused by NullPointerException" }).taskClass, "coding_coverage");
+  const failureRoute = routeTask({ task: "Debug this Spring stack trace\njava.lang.NullPointerException\n\tat com.acme.OrderService.load(OrderService.java:42)" });
+  assert.equal(failureRoute.taskClass, "debug_runtime");
+  assert.equal(failureRoute.acquisitionMode, "failure_packet");
+  assert.equal(failureRoute.evidenceContract, "failure_contract");
   assert.equal(routeTask({ task: "Implement validation in OrderService" }).taskClass, "coding_coverage");
   assert.equal(routeTask({ task: "Write unit tests for OrderService" }).taskClass, "coding_coverage");
   assert.equal(routeTask({ task: "Refactor OrderService to extract validation" }).taskClass, "refactor_scope");
   assert.equal(routeTask({ task: "Find usages of PaymentGateway.authorize" }).taskClass, "exact_symbol");
+
+  const tracebug = routeTask({ task: "Tracebug OrderService.java:42 failing test OrderServiceTest.shouldRejectMissingPartition" });
+  assert.equal(tracebug.taskClass, "exact_symbol");
+  assert.equal(tracebug.action, "exact_route");
+  assert.equal(tracebug.acquisitionMode, "direct_narrow");
+  assert.equal(tracebug.evidenceContract, "trace_proof");
+
+  const missingTracebug = routeTask({ task: "tracebug this issue" });
+  assert.equal(missingTracebug.taskClass, "needs_input_bypass");
+  assert.equal(missingTracebug.acquisitionMode, "ask_or_bypass");
+  assert.equal(missingTracebug.evidenceContract, "artifact_sufficiency");
+  assert.equal(missingTracebug.budgetPolicy.maxTotalActions, 0);
 
   const small = routeTask({
     task: "Inspect src/orders/OrderService.ts and explain the risk",
@@ -30,6 +47,28 @@ test("router classifies review, debug, refactor, exact, and small-repo bypass ta
   });
   assert.equal(small.taskClass, "small_repo_bypass");
   assert.equal(small.action, "bypass");
+});
+
+test("playbook registry resolves acquisition modes and budgets", () => {
+  const ids = listPlaybooks().map((playbook) => playbook.id).sort();
+  assert.deepEqual(ids, [
+    "broad_compile",
+    "coding_coverage",
+    "failure_packet",
+    "missing_artifact",
+    "review_bounded",
+    "security_audit",
+    "tracebug_direct"
+  ]);
+
+  assert.equal(getPlaybook("tracebug_direct").acquisitionMode, "direct_narrow");
+  assert.equal(getPlaybook("tracebug_direct").evidenceContract, "trace_proof");
+  assert.equal(getPlaybook("missing_artifact").budgetPolicy.maxTotalActions, 0);
+  assert.equal(getPlaybook("coding_coverage").budgetPolicy.maxFollowups, 1);
+  assert.match(getPlaybook("review_bounded").answerabilityRule, /ISTQB/);
+  assert.match(getPlaybook("review_bounded").answerabilityRule, /invariant/);
+  assert.match(getPlaybook("review_bounded").answerabilityRule, /user checklist/);
+  assert.equal(getPlaybook("review_bounded").taskSignals.includes("user_checklist"), true);
 });
 
 test("shadow answerability gate logs would-deny without blocking", () => {

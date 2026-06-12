@@ -1,7 +1,10 @@
 import { appendEvent } from "./observability.js";
 import { taskClassFromTaskType } from "./router.js";
 import { tokenizeCommand } from "./shell.js";
+import { estimateTokens } from "./token-estimator.js";
 import type { EvidenceTaskState, ShadowGateLog, TokenOptConfig } from "./types.js";
+
+const TOOL_CALL_OVERHEAD_TOKENS = 600;
 
 export interface ShadowGateInput {
   state: EvidenceTaskState;
@@ -91,5 +94,5 @@ function extractCommand(toolInput: unknown): string | undefined {
 
 function estimateToolTokens(toolInput: unknown): number {
   const text = typeof toolInput === "string" ? toolInput : JSON.stringify(toolInput ?? {});
-  return Math.max(1, Math.ceil(text.length / 4) + 600);
+  return estimateTokens(text) + TOOL_CALL_OVERHEAD_TOKENS;
 }

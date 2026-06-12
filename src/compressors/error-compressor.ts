@@ -1,4 +1,5 @@
 import type { CompressionResult } from "../types.js";
+import { estimateTokensSaved } from "../token-estimator.js";
 
 export function looksLikeErrorSummary(text: string): boolean {
   return /(error|exception|failed|failure|panic|fatal|assertion)/i.test(text) && text.length > 800;
@@ -31,7 +32,7 @@ export function compressErrorSummary(text: string, limitChars: number): Compress
     text: capped,
     originalChars: normalized.length,
     compressedChars: capped.length,
-    estimatedTokensSaved: Math.ceil(Math.max(0, normalized.length - capped.length) / 4)
+    estimatedTokensSaved: estimateTokensSaved(normalized.length, capped.length)
   };
 }
 

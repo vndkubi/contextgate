@@ -1,9 +1,11 @@
 import type { CompressionResult } from "./types.js";
+import { computeAdaptiveOutputBudget } from "./budget.js";
 import { compressBuildLog, looksLikeBuildLog } from "./compressors/build-log-compressor.js";
 import { compressErrorSummary, looksLikeErrorSummary } from "./compressors/error-compressor.js";
 import { compressJavaTrace, looksLikeJavaTrace } from "./compressors/java-trace-compressor.js";
 import { compressJsonResult, looksLikeJsonResult } from "./compressors/json-result-compressor.js";
 import { compressReviewFindings, looksLikeReviewFindings } from "./compressors/review-findings.js";
+import { estimateTokens as estimateTokenCount, estimateTokensSaved } from "./token-estimator.js";
 
 const DEFAULT_LIMIT = 12_000;
 
@@ -41,21 +43,27 @@ export function extractTextFromToolResponse(response: unknown): string {
 export function compressText(text: string, limitChars = DEFAULT_LIMIT): CompressionResult {
   const normalized = text.replace(/\r\n/g, "\n");
   if (looksLikeJavaTrace(normalized)) {
-    return compressJavaTrace(normalized, limitChars);
+    const budget = computeAdaptiveOutputBudget({ configuredMaxChars: limitChars, outputKind: "java-trace" });
+    return withBudget(compressJavaTrace(normalized, budget.maxChars), budget);
   }
   if (looksLikeBuildLog(normalized)) {
-    return compressBuildLog(normalized, limitChars);
+    const budget = computeAdaptiveOutputBudget({ configuredMaxChars: limitChars, outputKind: "build-log" });
+    return withBudget(compressBuildLog(normalized, budget.maxChars), budget);
   }
   if (looksLikeJsonResult(normalized)) {
-    return compressJsonResult(normalized, limitChars);
+    const budget = computeAdaptiveOutputBudget({ configuredMaxChars: limitChars, outputKind: "json-result" });
+    return withBudget(compressJsonResult(normalized, budget.maxChars), budget);
   }
   const kind = detectKind(normalized);
   if (kind === "generic" && looksLikeReviewFindings(normalized)) {
-    return compressReviewFindings(normalized, limitChars);
+    const budget = computeAdaptiveOutputBudget({ configuredMaxChars: limitChars, outputKind: "review-findings" });
+    return withBudget(compressReviewFindings(normalized, budget.maxChars), budget);
   }
   if (kind === "generic" && looksLikeErrorSummary(normalized)) {
-    return compressErrorSummary(normalized, limitChars);
+    const budget = computeAdaptiveOutputBudget({ configuredMaxChars: limitChars, outputKind: "error-summary" });
+    return withBudget(compressErrorSummary(normalized, budget.maxChars), budget);
   }
+  const budget = computeAdaptiveOutputBudget({ configuredMaxChars: limitChars, outputKind: kind });
   const lines = normalized.split("\n");
   const summaryLines = selectSummaryLines(lines, kind);
   const header = [
@@ -64,13 +72,14 @@ export function compressText(text: string, limitChars = DEFAULT_LIMIT): Compress
     `originalChars: ${normalized.length}`
   ];
   const body = [...header, "", ...summaryLines].join("\n").trimEnd();
-  const capped = body.length > limitChars ? `${body.slice(0, Math.max(0, limitChars - 80))}\n\n[truncated by TokenOpt]` : body;
+  const capped = body.length > budget.maxChars ? `${body.slice(0, Math.max(0, budget.maxChars - 80))}\n\n[truncated by TokenOpt]` : body;
   return {
     kind,
     text: capped,
     originalChars: normalized.length,
     compressedChars: capped.length,
-    estimatedTokensSaved: estimateTokens(Math.max(0, normalized.length - capped.length))
+    estimatedTokensSaved: estimateTokensSaved(normalized.length, capped.length),
+    budget
   };
 }
 
@@ -85,7 +94,11 @@ export function shouldCompressOutput(text: string, maxChars: number): boolean {
 }
 
 export function estimateTokens(chars: number): number {
-  return Math.ceil(chars / 4);
+  return estimateTokenCount(chars);
+}
+
+function withBudget(result: CompressionResult, budget: NonNullable<CompressionResult["budget"]>): CompressionResult {
+  return { ...result, budget };
 }
 
 function detectKind(text: string): CompressionResult["kind"] {

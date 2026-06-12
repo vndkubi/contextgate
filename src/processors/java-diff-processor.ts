@@ -1,3 +1,5 @@
+import { estimateTokensSaved } from "../token-estimator.js";
+
 export interface JavaDiffFileSummary {
   file: string;
   additions: number;
@@ -62,7 +64,7 @@ export function prepareJavaDiff(diffText: string): JavaDiffSummary {
     semanticHints,
     originalChars: normalized.length,
     summaryChars: compactText.length,
-    estimatedTokensSaved: Math.ceil(Math.max(0, normalized.length - compactText.length) / 4)
+    estimatedTokensSaved: estimateTokensSaved(normalized.length, compactText.length, { kind: "java" })
   };
 }
 

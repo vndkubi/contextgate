@@ -37,6 +37,31 @@ export type EvidenceCoverageStatus = "covered" | "partial" | "missing";
 export type EvidenceNextAction = "answer_now" | "expand_exact" | "targeted_shell" | "ask_user";
 export type RouteAction = "compile" | "bypass" | "exact_route";
 export type OutputPreferredFormat = "unified_diff" | "compact_edit_plan" | "standard_answer";
+export type AcquisitionMode =
+  | "ask_or_bypass"
+  | "direct_narrow"
+  | "coding_coverage"
+  | "failure_packet"
+  | "review_bounded"
+  | "security_audit"
+  | "compile_evidence";
+export type EvidenceContractName =
+  | "artifact_sufficiency"
+  | "trace_proof"
+  | "coding_coverage"
+  | "failure_contract"
+  | "review_coverage"
+  | "security_coverage"
+  | "overview_contract";
+
+export interface BudgetPolicy {
+  maxMcpCalls: number;
+  maxShellCalls: number;
+  maxFileReads: number;
+  maxFollowups: number;
+  maxTotalActions: number;
+  tokenBudgetHint?: number;
+}
 
 export interface TokenOptConfig {
   version: 1;
@@ -135,6 +160,12 @@ export interface CompressionResult {
   originalChars: number;
   compressedChars: number;
   estimatedTokensSaved: number;
+  budget?: {
+    maxChars: number;
+    reason: string;
+    ceilingChars: number;
+    floorChars: number;
+  };
 }
 
 export interface RouteDecision {
@@ -142,6 +173,10 @@ export interface RouteDecision {
   taskType: EvidenceTaskType;
   toolProfile: ToolProfile;
   action: RouteAction;
+  acquisitionMode: AcquisitionMode;
+  evidenceContract: EvidenceContractName;
+  budgetPolicy: BudgetPolicy;
+  fallbackReason?: string;
   reason: string;
   confidence: number;
   promptSignals: string[];
@@ -210,6 +245,10 @@ export interface CodingCoverageContract {
 export interface CoverageCertificate {
   packet_id?: string;
   task_class: TaskClass;
+  acquisition_mode: AcquisitionMode;
+  evidence_contract: EvidenceContractName;
+  evidence_contract_pass: boolean;
+  fallback_reason?: string;
   answerable: boolean;
   confidence: number;
   dimensions: Record<string, EvidenceCoverageStatus>;
@@ -268,6 +307,10 @@ export interface EvidencePacket {
   task_type: EvidenceTaskType;
   route?: RouteDecision;
   repo_root: string;
+  acquisition_mode: AcquisitionMode;
+  evidence_contract: EvidenceContractName;
+  evidence_contract_pass: boolean;
+  fallback_reason?: string;
   answerable: boolean;
   confidence: number;
   coverage: Record<string, EvidenceCoverageStatus>;
@@ -289,9 +332,48 @@ export interface EvidencePacket {
   expires_at: string;
 }
 
+export interface TracebugEvidenceLine {
+  path: string;
+  lineStart: number;
+  lineEnd: number;
+  symbol?: string;
+  role: "top_frame" | "failing_assert" | "candidate_definition" | "caller" | "callee" | "nearby_test" | "config" | "build_script";
+  confidence: number;
+  why: string;
+  snippet: string;
+}
+
+export interface TracebugPacket {
+  status: "grounded" | "needs_read" | "needs_repro" | "needs_artifact";
+  traceClass: "runtime_exception" | "failing_test" | "compile_error" | "behavior_regression" | "unknown";
+  anchors: string[];
+  evidence: TracebugEvidenceLine[];
+  failurePacket?: FailurePacket;
+  recommendedNextAction: "answer_now" | "read_exact_slice" | "run_one_test" | "run_one_build" | "ask_for_artifact";
+  suggestedRead?: { path: string; lineStart: number; lineEnd: number };
+  suggestedCommand?: string;
+  answerability: {
+    directEvidence: boolean;
+    corroboration: boolean;
+    exactLineProof: boolean;
+    canAnswer: boolean;
+    reason: string;
+  };
+}
+
 export interface EvidenceTaskState {
   packet: EvidencePacket;
   stored_at: string;
+  repo_fingerprint?: RepoFingerprint;
+}
+
+export interface RepoFingerprint {
+  strategy: "git-head-and-status-v1" | "file-metadata-v1";
+  repoRoot: string;
+  head?: string;
+  statusHash?: string;
+  fileHash?: string;
+  createdAt: string;
 }
 
 export interface ObservabilityEvent {

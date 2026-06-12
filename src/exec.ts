@@ -89,7 +89,9 @@ async function collectWrappedResult(
     estimatedTokensSaved: compressed.estimatedTokensSaved,
     metadata: {
       exitCode,
-      durationMs
+      durationMs,
+      compressionBudgetChars: compressed.budget?.maxChars,
+      compressionBudgetReason: compressed.budget?.reason
     }
   });
 

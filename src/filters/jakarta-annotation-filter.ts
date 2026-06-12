@@ -1,3 +1,5 @@
+import { estimateTokensSaved } from "../token-estimator.js";
+
 export interface JakartaAnnotationFilterResult {
   text: string;
   collapsedGroups: number;
@@ -56,7 +58,7 @@ export function filterJakartaAnnotations(source: string): JakartaAnnotationFilte
     collapsedAnnotations: [...new Set(collapsedAnnotations)],
     originalChars: normalized.length,
     filteredChars: text.length,
-    estimatedTokensSaved: Math.ceil(Math.max(0, normalized.length - text.length) / 4)
+    estimatedTokensSaved: estimateTokensSaved(normalized.length, text.length, { kind: "java" })
   };
 }
 

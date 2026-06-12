@@ -1,4 +1,5 @@
 import type { CompressionResult } from "../types.js";
+import { estimateTokensSaved } from "../token-estimator.js";
 
 export function looksLikeJsonResult(text: string): boolean {
   const trimmed = text.trim();
@@ -31,7 +32,7 @@ export function compressJsonResult(text: string, limitChars: number): Compressio
     text: capped,
     originalChars: normalized.length,
     compressedChars: capped.length,
-    estimatedTokensSaved: Math.ceil(Math.max(0, normalized.length - capped.length) / 4)
+    estimatedTokensSaved: estimateTokensSaved(normalized.length, capped.length, { kind: "json" })
   };
 }
 
@@ -48,7 +49,7 @@ function fallback(text: string, limitChars: number): CompressionResult {
     text: capped,
     originalChars: text.length,
     compressedChars: capped.length,
-    estimatedTokensSaved: Math.ceil(Math.max(0, text.length - capped.length) / 4)
+    estimatedTokensSaved: estimateTokensSaved(text.length, capped.length, { kind: "json" })
   };
 }
 

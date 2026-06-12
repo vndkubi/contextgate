@@ -8,6 +8,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { loadConfig } from "./config.js";
 import { readRepoEvents } from "./observability.js";
 import { routeTask } from "./router.js";
+import { estimateTokens } from "./token-estimator.js";
 import type { EvidenceTaskType } from "./types.js";
 
 type BenchmarkMode =
@@ -974,13 +975,6 @@ function isImportantFile(filePath: string): boolean {
 function toolText(result: unknown): string {
   const content = (result as { content?: Array<{ type: string; text?: string }> }).content ?? [];
   return content.map((item) => (typeof item.text === "string" ? item.text : "")).join("\n");
-}
-
-function estimateTokens(value: string | number): number {
-  if (typeof value === "number") {
-    return Math.max(1, Math.ceil(Math.max(0, value) / 4));
-  }
-  return Math.max(1, Math.ceil(value.length / 4));
 }
 
 function firstFactValue(facts: string[], key: string): string | undefined {

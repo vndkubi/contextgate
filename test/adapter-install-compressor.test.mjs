@@ -154,6 +154,14 @@ test("native prompt pack installs reusable Copilot prompt files", () => {
   assert.match(securityAudit, /name: security-audit/);
   assert.match(securityAudit, /Use security_audit route/);
   assert.match(securityAudit, /never use broad shell review fallback/i);
+
+  const reviewCode = fs.readFileSync(path.join(repo, ".github", "prompts", "review-code.prompt.md"), "utf8");
+  assert.match(reviewCode, /two phases/i);
+  assert.match(reviewCode, /PR merge\/head worktree/);
+  assert.match(reviewCode, /ISTQB-style/);
+  assert.match(reviewCode, /user_checklist/);
+  assert.match(reviewCode, /pass, fail, gap, or not_applicable/);
+  assert.match(reviewCode, /Do not downgrade a proven regression/);
 });
 
 test("Copilot setup writes repo guidance and merges user MCP config", () => {

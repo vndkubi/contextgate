@@ -65,7 +65,8 @@ test("mcp full mode exposes command and project facts tools", async () => {
         "tokenopt_search",
         "tokenopt_symbol_packet",
         "tokenopt_symbols_find",
-        "tokenopt_test_neighbors"
+        "tokenopt_test_neighbors",
+        "tokenopt_tracebug_packet"
       ]);
     },
     { env: { TOKENOPT_MCP_MODE: "full" } }
@@ -126,6 +127,20 @@ test("mcp full mode runs coding coverage tools", async () => {
       assert.equal(failure.isError ?? false, false);
       assert.match(failure.content[0].text, /failure_kind: typescript/);
       assert.match(failure.content[0].text, /OrderService\.ts/);
+
+      const tracebug = await client.callTool({
+        name: "tokenopt_tracebug_packet",
+        arguments: {
+          query: "Tracebug missing order failure in OrderService.authorizePayment",
+          output: "Error: missing order\n    at OrderService.authorizePayment (src/orders/OrderService.ts:4:11)",
+          cwd: repo
+        }
+      });
+      assert.equal(tracebug.isError ?? false, false);
+      assert.match(tracebug.content[0].text, /TokenOpt tracebug packet/);
+      assert.match(tracebug.content[0].text, /status: grounded/);
+      assert.match(tracebug.content[0].text, /src\/orders\/OrderService\.ts/);
+      assert.equal(tracebug.structuredContent.packet.answerability.canAnswer, true);
     },
     { cwd: repo, env: { TOKENOPT_MCP_MODE: "full" } }
   );
@@ -233,6 +248,282 @@ test("mcp compile evidence returns security coverage contract without scope", as
       assert.equal(packet.structuredContent.packetSummary.route.taskClass, "security_audit");
       assert.equal(packet.structuredContent.packetSummary.answerable, false);
       assert.equal(packet.structuredContent.packetSummary.coverage_certificate.dimensions.target_or_diff_known, "missing");
+      assert.equal(packet.structuredContent.packetSummary.max_additional_calls, 0);
+    },
+    { cwd: repo }
+  );
+});
+
+test("mcp compile evidence returns generic review packet for C diff with related context", async () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "tokenopt-review-c-repo-"));
+  const fuseDir = path.join(repo, "hadoop-hdfs-project", "hadoop-hdfs-native-client", "src", "main", "native", "fuse-dfs");
+  fs.mkdirSync(fuseDir, { recursive: true });
+  fs.writeFileSync(path.join(repo, "package.json"), JSON.stringify({ name: "review-c-fixture" }, null, 2));
+  fs.writeFileSync(
+    path.join(fuseDir, "fuse_impls_open.c"),
+    [
+      "int dfs_open(const char *path, struct fuse_file_info *fi) {",
+      "  int flags = O_WRONLY;",
+      "  if ((flags & O_ACCMODE) == O_WRONLY) {",
+      "    fh->buf = NULL;",
+      "  } else {",
+      "    fh->buf = malloc(32768);",
+      "  }",
+      "}"
+    ].join("\n")
+  );
+  fs.writeFileSync(path.join(fuseDir, "fuse_file_handle.h"), "typedef struct dfs_fh_struct { char *buf; } dfs_fh;\n");
+
+  const diff = [
+    "Review this C diff",
+    "diff --git a/hadoop-hdfs-project/hadoop-hdfs-native-client/src/main/native/fuse-dfs/fuse_impls_flush.c b/hadoop-hdfs-project/hadoop-hdfs-native-client/src/main/native/fuse-dfs/fuse_impls_flush.c",
+    "--- a/hadoop-hdfs-project/hadoop-hdfs-native-client/src/main/native/fuse-dfs/fuse_impls_flush.c",
+    "+++ b/hadoop-hdfs-project/hadoop-hdfs-native-client/src/main/native/fuse-dfs/fuse_impls_flush.c",
+    "@@ -36,14 +36,18 @@",
+    " int dfs_flush(const char *path, struct fuse_file_info *fi) {",
+    "-  if (fi->flags & O_WRONLY) {",
+    "-    if (hdfsFlush(hdfsConnGetFs(fh->conn), file_handle) != 0) {",
+    "+  // fi->flags is not reliable in flush(); it may be 0.",
+    "+  ",
+    "+  if (fh->buf == NULL) {",
+    "+    if (hdfsHFlush(hdfsConnGetFs(fh->conn), file_handle) != 0) {",
+    "       return -EIO;",
+    "     }",
+    "   }",
+    " }"
+  ].join("\n");
+
+  await withTokenOptMcp(
+    async (client) => {
+      const packet = await client.callTool({
+        name: "tokenopt_compile_evidence",
+        arguments: {
+          task: diff,
+          task_type: "review_diff",
+          cwd: repo,
+          detail: "full",
+          include_structured_packet: true
+        }
+      });
+
+      assert.equal(packet.isError ?? false, false);
+      assert.match(packet.content[0].text, /answerable: true/);
+      assert.match(packet.content[0].text, /evidence_contract_pass: true/);
+      assert.match(packet.content[0].text, /changed_symbols=.*dfs_flush/);
+      assert.match(packet.content[0].text, /added_calls=.*hdfsHFlush/);
+      assert.match(packet.content[0].text, /removed_calls=.*hdfsFlush/);
+      assert.match(packet.content[0].text, /line_level_finding=trailing_whitespace/);
+      assert.match(packet.content[0].text, /fuse_impls_open\.c:\d+:.*fh->buf = NULL/);
+      assert.equal(packet.structuredContent.packetSummary.answerable, true);
+      assert.equal(packet.structuredContent.packetSummary.max_additional_calls, 0);
+    },
+    { cwd: repo }
+  );
+});
+
+test("mcp review packet emits config effective-policy recall probe", async () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "tokenopt-review-config-probe-"));
+  const sourceDir = path.join(repo, "src", "main", "java", "org", "apache", "hadoop", "hdfs", "server", "blockmanagement");
+  fs.mkdirSync(sourceDir, { recursive: true });
+  fs.writeFileSync(path.join(repo, "package.json"), JSON.stringify({ name: "review-config-probe" }, null, 2));
+  fs.writeFileSync(
+    path.join(sourceDir, "HeartbeatManager.java"),
+    [
+      "class HeartbeatManager {",
+      "  private volatile long heartbeatRecheckInterval;",
+      "  HeartbeatManager(boolean avoidStaleDataNodesForWrite, long staleInterval, long recheckInterval) {",
+      "    if (avoidStaleDataNodesForWrite && staleInterval < recheckInterval) {",
+      "      this.heartbeatRecheckInterval = staleInterval;",
+      "    } else {",
+      "      this.heartbeatRecheckInterval = recheckInterval;",
+      "    }",
+      "  }",
+      "  void setHeartbeatRecheckInterval(long interval) {",
+      "    heartbeatRecheckInterval = interval;",
+      "  }",
+      "}"
+    ].join("\n")
+  );
+  fs.writeFileSync(
+    path.join(sourceDir, "DatanodeManager.java"),
+    [
+      "class DatanodeManager {",
+      "  private int heartbeatRecheckInterval;",
+      "  private HeartbeatManager heartbeatManager;",
+      "  private void setHeartbeatInterval(long intervalSeconds, int recheckInterval) {",
+      "    this.heartbeatRecheckInterval = recheckInterval;",
+      "    heartbeatManager.setHeartbeatRecheckInterval(heartbeatRecheckInterval);",
+      "  }",
+      "}"
+    ].join("\n")
+  );
+
+  const diff = [
+    "Review this heartbeat reconfiguration diff",
+    "diff --git a/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/DatanodeManager.java b/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/DatanodeManager.java",
+    "--- a/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/DatanodeManager.java",
+    "+++ b/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/DatanodeManager.java",
+    "@@ -4,6 +4,7 @@ private void setHeartbeatInterval(long intervalSeconds, int recheckInterval) {",
+    "     this.heartbeatRecheckInterval = recheckInterval;",
+    "+    heartbeatManager.setHeartbeatRecheckInterval(heartbeatRecheckInterval);",
+    "   }",
+    "diff --git a/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/HeartbeatManager.java b/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/HeartbeatManager.java",
+    "--- a/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/HeartbeatManager.java",
+    "+++ b/src/main/java/org/apache/hadoop/hdfs/server/blockmanagement/HeartbeatManager.java",
+    "@@ -8,6 +8,9 @@ class HeartbeatManager {",
+    "+  void setHeartbeatRecheckInterval(long interval) {",
+    "+    heartbeatRecheckInterval = interval;",
+    "+  }"
+  ].join("\n");
+
+  await withTokenOptMcp(
+    async (client) => {
+      const packet = await client.callTool({
+        name: "tokenopt_compile_evidence",
+        arguments: {
+          task: diff,
+          task_type: "review_diff",
+          cwd: repo,
+          detail: "full",
+          include_structured_packet: true
+        }
+      });
+
+      assert.equal(packet.isError ?? false, false);
+      assert.match(packet.content[0].text, /recall_probe=config_effective_policy_invariant/);
+      assert.match(packet.content[0].text, /technical_finding_candidate=true/);
+      assert.match(packet.content[0].text, /severity_hint=P2/);
+      assert.match(packet.content[0].text, /Raw heartbeatRecheckInterval is pushed into HeartbeatManager/);
+      assert.match(packet.content[0].text, /staleInterval < recheckInterval/);
+      assert.equal(packet.structuredContent.packetSummary.answerable, true);
+    },
+    { cwd: repo }
+  );
+});
+
+test("mcp review packet emits parser encoding recall probe", async () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "tokenopt-review-parser-probe-"));
+  const sourceDir = path.join(repo, "x-pack", "plugin", "core", "src", "main", "java", "org", "elasticsearch", "xpack", "core", "security", "support");
+  fs.mkdirSync(sourceDir, { recursive: true });
+  fs.writeFileSync(path.join(repo, "package.json"), JSON.stringify({ name: "review-parser-probe" }, null, 2));
+  fs.writeFileSync(
+    path.join(sourceDir, "Automatons.java"),
+    [
+      "class Automatons {",
+      "  private static Automaton literalStringUnion(List<BytesRef> refs) {",
+      "    return Automata.makeStringUnion(refs);",
+      "  }",
+      "  private static Automaton buildAutomatonWithLiteralPartition(Collection<String> patterns) {",
+      "    final BytesRef ref = (pattern.isEmpty() == false && isLiteralPattern(pattern)) ? new BytesRef(pattern) : null;",
+      "    return literalStringUnion(refs);",
+      "  }",
+      "  static Automaton wildcard(String text) {",
+      "    for (int i = 0; i < text.length(); i++) {",
+      "      automata.add(Automata.makeChar(text.charAt(i)));",
+      "    }",
+      "    return Operations.concatenate(automata);",
+      "  }",
+      "}"
+    ].join("\n")
+  );
+
+  const diff = [
+    "Review this security privilege automaton diff",
+    "diff --git a/x-pack/plugin/core/src/main/java/org/elasticsearch/xpack/core/security/support/Automatons.java b/x-pack/plugin/core/src/main/java/org/elasticsearch/xpack/core/security/support/Automatons.java",
+    "--- a/x-pack/plugin/core/src/main/java/org/elasticsearch/xpack/core/security/support/Automatons.java",
+    "+++ b/x-pack/plugin/core/src/main/java/org/elasticsearch/xpack/core/security/support/Automatons.java",
+    "@@ -1,5 +1,12 @@",
+    "+  private static Automaton literalStringUnion(List<BytesRef> refs) {",
+    "+    return Automata.makeStringUnion(refs);",
+    "+  }",
+    "+  private static Automaton buildAutomatonWithLiteralPartition(Collection<String> patterns) {",
+    "+    final BytesRef ref = (pattern.isEmpty() == false && isLiteralPattern(pattern)) ? new BytesRef(pattern) : null;",
+    "+    return literalStringUnion(refs);",
+    "+  }"
+  ].join("\n");
+
+  await withTokenOptMcp(
+    async (client) => {
+      const packet = await client.callTool({
+        name: "tokenopt_compile_evidence",
+        arguments: {
+          task: diff,
+          task_type: "review_diff",
+          cwd: repo,
+          detail: "full",
+          include_structured_packet: true
+        }
+      });
+
+      assert.equal(packet.isError ?? false, false);
+      assert.match(packet.content[0].text, /recall_probe=parser_encoding_language_equivalence/);
+      assert.match(packet.content[0].text, /technical_finding_candidate=true/);
+      assert.match(packet.content[0].text, /severity_hint=P2/);
+      assert.match(packet.content[0].text, /BytesRef\/makeStringUnion compiles literal strings through UTF-8 bytes/);
+      assert.match(packet.content[0].text, /Automata\.makeChar/);
+      assert.equal(packet.structuredContent.packetSummary.answerable, true);
+    },
+    { cwd: repo }
+  );
+});
+
+test("mcp compile evidence returns direct-narrow tracebug packet without inventory", async () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "tokenopt-tracebug-direct-repo-"));
+  fs.writeFileSync(path.join(repo, "package.json"), JSON.stringify({ name: "tracebug-direct-fixture" }, null, 2));
+
+  await withTokenOptMcp(
+    async (client) => {
+      const packet = await client.callTool({
+        name: "tokenopt_compile_evidence",
+        arguments: {
+          task: "Tracebug OrderService.java:42 failing test OrderServiceTest.shouldRejectMissingPartition",
+          task_type: "investigate",
+          cwd: repo,
+          detail: "full",
+          include_structured_packet: true
+        }
+      });
+
+      assert.equal(packet.isError ?? false, false);
+      assert.match(packet.content[0].text, /route_decision: exact_symbol\/exact\/exact_route/);
+      assert.match(packet.content[0].text, /acquisition_mode: direct_narrow/);
+      assert.match(packet.content[0].text, /evidence_contract: trace_proof/);
+      assert.match(packet.content[0].text, /repo_inventory=skipped/);
+      assert.doesNotMatch(packet.content[0].text, /total_files=/);
+      assert.equal(packet.structuredContent.packetSummary.acquisition_mode, "direct_narrow");
+      assert.equal(packet.structuredContent.packetSummary.evidence_contract, "trace_proof");
+      assert.equal(packet.structuredContent.packetSummary.evidence_contract_pass, false);
+      assert.equal(packet.structuredContent.packetSummary.max_additional_calls, 1);
+    },
+    { cwd: repo, env: { TOKENOPT_MCP_MODE: "full" } }
+  );
+});
+
+test("mcp compile evidence asks for tracebug artifact when missing", async () => {
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), "tokenopt-tracebug-missing-repo-"));
+  fs.writeFileSync(path.join(repo, "package.json"), JSON.stringify({ name: "tracebug-missing-fixture" }, null, 2));
+
+  await withTokenOptMcp(
+    async (client) => {
+      const packet = await client.callTool({
+        name: "tokenopt_compile_evidence",
+        arguments: {
+          task: "tracebug this issue",
+          task_type: "investigate",
+          cwd: repo,
+          detail: "full",
+          include_structured_packet: true
+        }
+      });
+
+      assert.equal(packet.isError ?? false, false);
+      assert.match(packet.content[0].text, /route_decision: needs_input_bypass\/bypass\/bypass/);
+      assert.match(packet.content[0].text, /acquisition_mode: ask_or_bypass/);
+      assert.match(packet.content[0].text, /recommended_next_action: ask_user/);
+      assert.match(packet.content[0].text, /max_additional_calls: 0/);
+      assert.match(packet.content[0].text, /repo_inventory=skipped/);
+      assert.equal(packet.structuredContent.packetSummary.acquisition_mode, "ask_or_bypass");
+      assert.equal(packet.structuredContent.packetSummary.evidence_contract, "artifact_sufficiency");
       assert.equal(packet.structuredContent.packetSummary.max_additional_calls, 0);
     },
     { cwd: repo }

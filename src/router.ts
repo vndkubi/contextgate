@@ -1,3 +1,4 @@
+import { getPlaybook, playbookForTaskClass, type PlaybookId } from "./playbooks.js";
 import type { EvidenceTaskType, RouteDecision, TaskClass, ToolProfile } from "./types.js";
 
 export interface RouteTaskInput {
@@ -25,13 +26,36 @@ export function routeTask(input: RouteTaskInput): RouteDecision {
   const hasExactTarget = hasExactFileTarget || hasExactSymbolTarget;
   const requestedTaskType = input.requestedTaskType && input.requestedTaskType !== "unknown" ? input.requestedTaskType : undefined;
   const missingArtifactReason = getMissingArtifactReason(task, prompt, signals);
+  const tracebugClassification = classifyTracebugPrompt(task, prompt, signals);
 
   if (isSecurityAuditPrompt(prompt)) {
     return decision("security_audit", "review_diff", "security", "compile", [
       missingArtifactReason ?? "Prompt is security-audit oriented; require explicit security coverage before answerability.",
       ...(missingArtifactReason ? ["artifact:missing"] : []),
       ...signals
-    ]);
+    ], "security_audit", missingArtifactReason ? "missing_security_scope" : undefined);
+  }
+
+  if (tracebugClassification === "missing_artifact") {
+    return decision("needs_input_bypass", requestedTaskType ?? "investigate", "bypass", "bypass", [
+      "Prompt asks for tracebug/bug investigation but no concrete failing test, stack trace, error output, repro path, file, symbol, line, or exact behavior was provided.",
+      "artifact:missing",
+      ...signals
+    ], "missing_artifact", "missing_tracebug_artifact");
+  }
+
+  if (tracebugClassification === "failure_packet") {
+    return decision("debug_runtime", requestedTaskType ?? "investigate", "debug", "compile", [
+      "Prompt includes failure output; normalize it as a failure packet before any broad repository acquisition.",
+      ...signals
+    ], "failure_packet");
+  }
+
+  if (tracebugClassification === "direct_narrow") {
+    return decision("exact_symbol", requestedTaskType ?? "investigate", "exact", "exact_route", [
+      "Prompt is an exact tracebug/code-flow proof task; use native narrow search/read or one tracebug packet instead of broad ContextGate first.",
+      ...signals
+    ], "tracebug_direct");
   }
 
   if (missingArtifactReason) {
@@ -39,56 +63,56 @@ export function routeTask(input: RouteTaskInput): RouteDecision {
       missingArtifactReason,
       "artifact:missing",
       ...signals
-    ]);
+    ], "missing_artifact", "missing_required_artifact");
   }
 
   if ((input.repoFileCount ?? Number.MAX_SAFE_INTEGER) < SMALL_REPO_FILE_LIMIT && hasExactFileTarget && !isReviewPrompt(prompt)) {
     return decision("small_repo_bypass", requestedTaskType ?? "field_impact", "bypass", "bypass", [
       "Small repository with an exact file or symbol target; generic evidence compilation is likely overhead.",
       ...signals
-    ]);
+    ], "tracebug_direct");
   }
 
   if (isReviewPrompt(prompt)) {
     return decision("review_diff", "review_diff", "review", "compile", [
       "Prompt is review/diff oriented; use review-shaped evidence and avoid repo-wide exploration.",
       ...signals
-    ]);
+    ], "review_bounded");
   }
 
   if (isCodingCoveragePrompt(task, requestedTaskType)) {
     return decision("coding_coverage", requestedTaskType ?? inferCodingTaskType(task), "coding", "compile", [
       "Prompt is a coding task; require symbol/test/failure coverage before answerability.",
       ...signals
-    ]);
+    ], "coding_coverage");
   }
 
   if (/\b(stack trace|exception|failing test|build failure|runtime|root cause|diagnose|debug|caused by)\b/i.test(task)) {
     return decision("debug_runtime", requestedTaskType ?? "investigate", "debug", "compile", [
       "Prompt is runtime/debug oriented; preserve failure slices and allow exact fallback for missing frames.",
       ...signals
-    ]);
+    ], "failure_packet");
   }
 
   if (/\b(refactor|rename|move|extract|split|migrate)\b/i.test(task)) {
     return decision("refactor_scope", requestedTaskType ?? "implement", "refactor", "compile", [
       "Prompt is refactor/change-scope oriented; gather impact evidence and prefer diff output.",
       ...signals
-    ]);
+    ], "coding_coverage");
   }
 
   if (/\b(find usages|where defined|who calls|callers|references|definition|impact of)\b/i.test(task) || hasExactTarget) {
     return decision("exact_symbol", requestedTaskType ?? "field_impact", "exact", "exact_route", [
       "Prompt asks for exact symbol or file impact; use targeted search/read instead of generic MCP-first.",
       ...signals
-    ]);
+    ], "tracebug_direct");
   }
 
   const taskType = requestedTaskType ?? inferBroadTaskType(task);
   return decision("broad_flow", taskType, "explore", "compile", [
     "Prompt needs broad repository context; compile a compact evidence packet before further exploration.",
     ...signals
-  ]);
+  ], "broad_compile");
 }
 
 export function taskClassFromTaskType(taskType: EvidenceTaskType): TaskClass {
@@ -117,8 +141,11 @@ function decision(
   taskType: EvidenceTaskType,
   toolProfile: ToolProfile,
   action: RouteDecision["action"],
-  reasons: string[]
+  reasons: string[],
+  playbookId?: PlaybookId,
+  fallbackReason?: string
 ): RouteDecision {
+  const playbook = playbookId ? getPlaybook(playbookId) : playbookForTaskClass(taskClass);
   const confidence = taskClass === "broad_flow"
     ? 0.72
     : taskClass === "small_repo_bypass" || taskClass === "needs_input_bypass"
@@ -131,11 +158,59 @@ function decision(
     taskType,
     toolProfile,
     action,
+    acquisitionMode: playbook.acquisitionMode,
+    evidenceContract: playbook.evidenceContract,
+    budgetPolicy: playbook.budgetPolicy,
+    fallbackReason,
     reason: reasons[0] ?? "Route selected by prompt heuristics.",
     confidence,
     promptSignals: reasons.slice(1, 12),
     negativeControl: taskClass === "small_repo_bypass" || taskClass === "exact_symbol" || taskClass === "needs_input_bypass"
   };
+}
+
+type TracebugClassification = "missing_artifact" | "direct_narrow" | "failure_packet" | undefined;
+
+function classifyTracebugPrompt(task: string, prompt: string, signals: string[]): TracebugClassification {
+  if (!isTracebugPrompt(task, prompt)) {
+    return undefined;
+  }
+  if (!hasTracebugArtifact(task, prompt, signals)) {
+    return "missing_artifact";
+  }
+  if (hasLongFailureArtifact(task)) {
+    return "failure_packet";
+  }
+  return "direct_narrow";
+}
+
+function isTracebugPrompt(task: string, prompt: string): boolean {
+  if (isReviewPrompt(prompt) || isSecurityAuditPrompt(prompt) || isUnitTestPlanningPrompt(prompt)) {
+    return false;
+  }
+  return /\b(tracebug|trace bug|bug trace|trace this bug|trace the bug|line-level proof|line level proof|root cause|debug|diagnose|failing test|stack trace|traceback|caused by|runtime exception|build failure|compile error|compilation error|why does|why is)\b/i.test(task);
+}
+
+function hasTracebugArtifact(task: string, prompt: string, signals: string[]): boolean {
+  if (signals.some((signal) => signal.startsWith("file:") || signal.startsWith("symbol:") || signal === "diff:inline")) {
+    return true;
+  }
+  return /\b(?:stack trace|traceback|caused by|build failure|compilation error|compile error|repro|reproduction|guard|condition|check|logic)\b/i.test(task) ||
+    /\bfailing test\s+[`"']?[A-Za-z0-9_.#:-]+/i.test(task) ||
+    /\b[A-Z][A-Za-z0-9_]*(?:Exception|Error)\b/.test(task) ||
+    /\b(?:expected|actual|endpoint|route|api|behavior|failure)\s*[:=]\s*\S.{8,}/i.test(task) ||
+    /\b(?:GET|POST|PUT|PATCH|DELETE)\s+\/[A-Za-z0-9_./{}:-]+/i.test(task) ||
+    /\bline\s+\d+\b/i.test(task) ||
+    /\b[A-Za-z0-9_./\\-]+\.(?:ts|tsx|js|jsx|java|py):\d+\b/i.test(task) ||
+    /```[\s\S]{20,}```/.test(task) ||
+    /[`"'][^`"']{12,}[`"']/.test(task) ||
+    /\b(?:behavior|bug|issue|failure)\s*:\s*\S.{12,}/i.test(prompt);
+}
+
+function hasLongFailureArtifact(task: string): boolean {
+  const lines = task.split(/\r?\n/).filter((line) => line.trim().length > 0);
+  return lines.length >= 3 &&
+    /\b(?:stack trace|traceback|caused by|BUILD FAILURE|COMPILATION ERROR|Tests run:|FAIL|FAILED|AssertionError|TS\d{4}|Exception|Error)\b/i.test(task);
 }
 
 function getMissingArtifactReason(task: string, prompt: string, signals: string[]): string | undefined {
@@ -192,8 +267,10 @@ function missingArtifactTaskType(task: string, prompt: string, requestedTaskType
 }
 
 function isSecurityAuditPrompt(prompt: string): boolean {
-  return /\b(security|vulnerab|exploit|authn|authz|authorization|authentication|permission|secret|csrf|xss|sql injection|deseriali[sz]ation)\b/i.test(prompt) &&
+  const explicitSecurityReview = /\b(security[-\s]*focused\s+review|security\s+(audit|review)|audit\s+security)\b/i.test(prompt);
+  const explicitVulnerabilityReview = /\b(vulnerab|exploit|privilege\s+escalation|secret\s+(leak|exposure|scan|review)|csrf|xss|sql injection|deseriali[sz]ation)\b/i.test(prompt) &&
     /\b(review|audit|findings?|risky surfaces?|changed behavior)\b/i.test(prompt);
+  return explicitSecurityReview || explicitVulnerabilityReview;
 }
 
 function isPromoteReviewMemoryPrompt(prompt: string): boolean {

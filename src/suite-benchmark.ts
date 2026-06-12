@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { routeTask } from "./router.js";
-import type { EvidenceTaskType } from "./types.js";
+import type { AcquisitionMode, EvidenceContractName, EvidenceTaskType } from "./types.js";
 
 type SuiteBenchmarkMode = "baseline" | "mcp-first" | "mcp-only" | "compiled-hard-gate" | "router-strict" | "router-best";
 
@@ -77,6 +77,11 @@ interface SuiteBenchmarkRow extends CodexRunMetrics {
   project: string;
   taskId: string;
   taskClass: string;
+  acquisitionMode: AcquisitionMode;
+  evidenceContract: EvidenceContractName;
+  evidenceContractPass: boolean;
+  fallbackReason: string;
+  doubleSpend: boolean;
   mode: SuiteBenchmarkMode;
   prompt: string;
   codexPrompt: string;
@@ -127,12 +132,22 @@ export async function runSuiteBenchmarkCommand(args: string[]): Promise<number> 
       const codexPrompt = buildSuitePrompt(item.repo, item.task, mode);
       const run = runCodexSuiteBenchmark(item.repo, item.task, mode, codexPrompt, options);
       const quality = scoreSuiteAnswer(item.task, run.finalAnswer);
+      const routeMetadata = buildSuiteRouteMetadata(item.task.prompt, inferTaskType(item.task), {
+        finalAnswer: run.finalAnswer,
+        mcpCalls: run.mcpCalls,
+        shellCalls: run.shellCalls
+      });
       rows.push({
         ...run,
         repo: item.repo,
         project: item.task.project,
         taskId: item.task.id,
         taskClass: item.task.class,
+        acquisitionMode: routeMetadata.acquisitionMode,
+        evidenceContract: routeMetadata.evidenceContract,
+        evidenceContractPass: routeMetadata.evidenceContractPass,
+        fallbackReason: routeMetadata.fallbackReason,
+        doubleSpend: routeMetadata.doubleSpend,
         mode,
         prompt: item.task.prompt,
         codexPrompt,
@@ -468,6 +483,12 @@ function buildSuitePrompt(repo: string, task: SuiteTask, mode: SuiteBenchmarkMod
 
   const taskType = inferTaskType(task);
   const packetTokens = task.maxBudget?.packetTokens ?? 1200;
+  const taskArgumentLine = taskType === "review_diff"
+    ? "- For tokenopt_compile_evidence, pass task as the complete user request above including the full inline unified diff; do not summarize or omit the diff."
+    : "- For tokenopt_compile_evidence, pass task as the complete user request above.";
+  const carryPacketEvidenceLine = taskType === "review_diff"
+    ? "- In the final JSON, carry packet facts such as changed_files, changed_symbols, added_calls, removed_calls, and exact_changes into notes or finding evidence even when there is no behavior finding."
+    : "- Ground the final answer in packet evidence.";
   if (mode === "router-strict") {
     const routerPlan =
       taskType === "review_diff"
@@ -478,6 +499,8 @@ function buildSuitePrompt(repo: string, task: SuiteTask, mode: SuiteBenchmarkMod
       "- TokenOpt router selected strict acquisition for this task.",
       `- Router plan: ${routerPlan}`,
       `- Call tokenopt_compile_evidence with cwd=${repo}, task_type=${taskType}, and budget_tokens around ${packetTokens}.`,
+      taskArgumentLine,
+      carryPacketEvidenceLine,
       "- Preserve the requested JSON contract. Do not call shell; it is disabled in this benchmark mode.",
       "- If evidence is still incomplete after the allowed exact followups, return the best supported answer and mark unresolved risks explicitly."
     ].join("\n");
@@ -489,21 +512,25 @@ function buildSuitePrompt(repo: string, task: SuiteTask, mode: SuiteBenchmarkMod
       const useMcpPacket = shouldUseMcpForMissingArtifact(task);
       return [
         ...common,
-        "- TokenOpt router selected missing-artifact bypass for this task.",
+        `- TokenOpt router selected acquisition_mode=${route.acquisitionMode} and evidence_contract=${route.evidenceContract}.`,
         `- Router plan: ${route.reason}`,
         useMcpPacket
           ? `- Call tokenopt_compile_evidence with cwd=${repo}, task_type=${taskType}, and budget_tokens around ${packetTokens}; do not use any followup tools.`
           : "- Do not call tokenopt_compile_evidence; the router already has enough information to know the required artifact is missing.",
+        useMcpPacket ? taskArgumentLine : undefined,
+        useMcpPacket ? carryPacketEvidenceLine : undefined,
         "- Do not call shell; it is disabled because no concrete artifact was provided.",
         "- Preserve the requested JSON contract. Return a bounded answer that explicitly asks for the missing artifact and does not invent repo-specific evidence."
-      ].join("\n");
+      ].filter((line): line is string => line !== undefined).join("\n");
     }
     if (route.taskClass === "security_audit") {
       return [
         ...common,
-        "- TokenOpt router selected security-audit coverage for this task.",
+        `- TokenOpt router selected acquisition_mode=${route.acquisitionMode} and evidence_contract=${route.evidenceContract}.`,
         `- Router plan: ${route.reason}`,
         `- Call tokenopt_compile_evidence with cwd=${repo}, task_type=review_diff, and budget_tokens around ${packetTokens}.`,
+        taskArgumentLine,
+        carryPacketEvidenceLine,
         "- Do not call shell; security findings require concrete diff/scope coverage first.",
         "- If the packet recommends ask_user, return JSON that states the missing scope and does not invent findings."
       ].join("\n");
@@ -520,11 +547,13 @@ function buildSuitePrompt(repo: string, task: SuiteTask, mode: SuiteBenchmarkMod
         : "- Do not call shell; it is disabled in this benchmark mode for this task.";
     return [
       ...common,
-      "- TokenOpt router selected the cheapest safe acquisition profile for this task.",
+      `- TokenOpt router selected acquisition_mode=${route.acquisitionMode} and evidence_contract=${route.evidenceContract}.`,
       `- Router plan: ${routerPlan}`,
       deterministicReview || taskType !== "review_diff"
         ? `- Call tokenopt_compile_evidence with cwd=${repo}, task_type=${taskType}, and budget_tokens around ${packetTokens}.`
         : `- Call tokenopt_compile_evidence with cwd=${repo}, task_type=${taskType}, and budget_tokens around ${packetTokens}.`,
+      taskArgumentLine,
+      carryPacketEvidenceLine,
       shellPolicy,
       "- Preserve the requested JSON contract. Include unresolved risks when evidence is incomplete."
     ].join("\n");
@@ -543,6 +572,8 @@ function buildSuitePrompt(repo: string, task: SuiteTask, mode: SuiteBenchmarkMod
     ...common,
     "- Use the TokenOpt MCP tool tokenopt_compile_evidence first.",
     `- Call it with cwd=${repo}, task_type=${taskType}, and budget_tokens around ${packetTokens}.`,
+    taskArgumentLine,
+    carryPacketEvidenceLine,
     hardGateLine,
     shellLine
   ].join("\n");
@@ -680,11 +711,88 @@ function parseCodexJsonl(text: string): {
   return { finalAnswer, usage, toolCalls, shellCalls, mcpCalls, toolInputChars, toolOutputChars, warnings };
 }
 
+export function buildSuiteRouteMetadata(
+  prompt: string,
+  taskType: EvidenceTaskType,
+  run: { finalAnswer?: string; mcpCalls?: number; shellCalls?: number } = {}
+): {
+  acquisitionMode: AcquisitionMode;
+  evidenceContract: EvidenceContractName;
+  evidenceContractPass: boolean;
+  fallbackReason: string;
+  doubleSpend: boolean;
+} {
+  const route = routeTask({ task: prompt, requestedTaskType: taskType });
+  const finalAnswer = run.finalAnswer ?? "";
+  const acquisitionMode = extractEnumField<AcquisitionMode>(finalAnswer, "acquisition_mode") ?? route.acquisitionMode;
+  const evidenceContract = extractEnumField<EvidenceContractName>(finalAnswer, "evidence_contract") ?? route.evidenceContract;
+  const packetContractPass = extractBooleanField(finalAnswer, "evidence_contract_pass");
+  const evidenceContractPass = packetContractPass ?? inferContractPassFromAnswer(finalAnswer, acquisitionMode);
+  const fallbackReason = extractStringField(finalAnswer, "fallback_reason") ?? route.fallbackReason ?? "";
+  const doubleSpend = detectDoubleSpend({
+    acquisitionMode,
+    finalAnswer,
+    mcpCalls: run.mcpCalls ?? 0,
+    shellCalls: run.shellCalls ?? 0
+  });
+  return { acquisitionMode, evidenceContract, evidenceContractPass, fallbackReason, doubleSpend };
+}
+
+function extractEnumField<T extends string>(text: string, field: string): T | undefined {
+  return extractStringField(text, field) as T | undefined;
+}
+
+function extractStringField(text: string, field: string): string | undefined {
+  const yamlLike = text.match(new RegExp(`${escapeRegExp(field)}\\s*:\\s*["']?([A-Za-z0-9_/-]+)["']?`, "i"));
+  if (yamlLike?.[1]) {
+    return yamlLike[1];
+  }
+  const jsonLike = text.match(new RegExp(`"${escapeRegExp(field)}"\\s*:\\s*"([^"]+)"`, "i"));
+  return jsonLike?.[1];
+}
+
+function extractBooleanField(text: string, field: string): boolean | undefined {
+  const yamlLike = text.match(new RegExp(`${escapeRegExp(field)}\\s*:\\s*(true|false)`, "i"));
+  if (yamlLike?.[1]) {
+    return yamlLike[1].toLowerCase() === "true";
+  }
+  const jsonLike = text.match(new RegExp(`"${escapeRegExp(field)}"\\s*:\\s*(true|false)`, "i"));
+  return jsonLike?.[1] ? jsonLike[1].toLowerCase() === "true" : undefined;
+}
+
+function inferContractPassFromAnswer(finalAnswer: string, acquisitionMode: AcquisitionMode): boolean {
+  if (acquisitionMode === "ask_or_bypass") {
+    return /\b(?:missing|provide|need|ask|artifact|diff|requirement|pbi|reproducer)\b/i.test(finalAnswer);
+  }
+  if (acquisitionMode === "direct_narrow") {
+    return /\b[A-Za-z0-9_./\\-]+\.(?:ts|tsx|js|jsx|java|py):\d+\b/.test(finalAnswer) &&
+      /\b(?:caller|callee|test|config|guard|corroborat|evidence)\b/i.test(finalAnswer);
+  }
+  return /\bevidence_contract_pass\s*:\s*true\b/i.test(finalAnswer);
+}
+
+function detectDoubleSpend(input: { acquisitionMode: AcquisitionMode; finalAnswer: string; mcpCalls: number; shellCalls: number }): boolean {
+  if (input.acquisitionMode === "ask_or_bypass") {
+    return input.mcpCalls > 1 || input.shellCalls > 0;
+  }
+  if (input.acquisitionMode === "direct_narrow") {
+    return input.mcpCalls > 1 || (input.mcpCalls > 0 && input.shellCalls > 0 && /repo-wide|rg --files|grep -R|findstr|full file/i.test(input.finalAnswer));
+  }
+  if (/\banswerable\s*:\s*true\b/i.test(input.finalAnswer) || /"answerable"\s*:\s*true/i.test(input.finalAnswer)) {
+    return input.shellCalls > 0 && /grep -R|rg --files|repo-wide|full file/i.test(input.finalAnswer);
+  }
+  return false;
+}
+
 function formatSuiteRows(rows: SuiteBenchmarkRow[], skippedRepos: SkippedRepo[], showAnswers: boolean): string {
   const header = [
     "Repo",
     "Task",
     "Mode",
+    "Acq",
+    "Contract",
+    "Contract ok",
+    "Double",
     "Quality",
     "Checks",
     "Correct",
@@ -706,6 +814,10 @@ function formatSuiteRows(rows: SuiteBenchmarkRow[], skippedRepos: SkippedRepo[],
     path.basename(row.repo),
     row.taskId,
     row.mode,
+    row.acquisitionMode,
+    row.evidenceContract,
+    row.evidenceContractPass ? "yes" : "no",
+    row.doubleSpend ? "yes" : "no",
     row.qualityScore.toFixed(3),
     row.qualityChecks,
     row.correct ? "yes" : "no",
@@ -833,6 +945,10 @@ function summaryHeader(): string[] {
     "Repo",
     "Task",
     "Mode",
+    "Acq",
+    "Contract",
+    "Contract ok",
+    "Double",
     "Correct",
     "Quality",
     "Critical",
@@ -857,6 +973,10 @@ function summaryCells(row: SuiteBenchmarkRow, rows: SuiteBenchmarkRow[]): string
     path.basename(row.repo),
     row.taskId,
     row.mode,
+    row.acquisitionMode,
+    row.evidenceContract,
+    row.evidenceContractPass ? "yes" : "no",
+    row.doubleSpend ? "yes" : "no",
     row.correct ? "yes" : "no",
     row.qualityScore.toFixed(3),
     String(row.criticalMisses.length),
@@ -1044,6 +1164,10 @@ function safeName(value: string): string {
   return value.replace(/[^a-z0-9_.-]+/gi, "_").slice(0, 120);
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function slash(value: string): string {
   return value.replace(/\\/g, "/");
 }
@@ -1087,6 +1211,9 @@ function shouldDisableShell(mode: SuiteBenchmarkMode, task: SuiteTask): boolean 
 
 function hasDeterministicReviewSupport(task: SuiteTask): boolean {
   const text = task.prompt;
+  if (/^diff --git\b/m.test(text) && /^@@\s+-\d+/m.test(text) && /\+\+\+ b\/.+\.(?:c|h|cc|cpp|java|ts|tsx|js|jsx|py|go|rs|kt|scala)\b/im.test(text)) {
+    return true;
+  }
   return (
     /RMWebServices\.java/.test(text) &&
     /withApplicationTags\s*\(\s*applicationTags\s*\)/.test(text) &&

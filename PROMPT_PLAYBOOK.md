@@ -161,12 +161,56 @@ This table summarizes the route behavior from the 37-prompt real Codex benchmark
 | Refactor, migration, implementation planning | MCP-first strict, shell off | Usually yes | `refactor_scope`: `-74.4%` total tokens, same average quality `0.938` | Use TokenOpt for impact scope unless the owning file/class is already known. |
 | Unit-test planning or unknown owning test area | MCP-first strict, shell off | Yes for planning | `exact_symbol`: `-61.4%` total tokens, quality improved from `0.750` to `1.000` | For planning, TokenOpt is useful. For writing tests against a known class, use narrow reads directly. |
 | Security audit | Security coverage route | Yes, as a coverage gate | New guardrail | Require concrete scope and security dimensions before findings; otherwise ask for scope or exact followups only. |
-| Review with a concrete diff or patch | Review evidence route | Yes if diff is present | Not separately isolated in this run | Give the actual diff. TokenOpt can compile review-shaped evidence. |
+| Review with a concrete diff or patch | Review evidence route | Yes if diff is present | Worktree PR benchmark: `-83.6%` input tokens overall, but recall still needs review-specific safeguards | Give the net diff and read follow-up context from the PR merge/head worktree. TokenOpt can compile review-shaped evidence, but the final answer must still run technical and business coverage checks. |
 | Review without a concrete diff | Missing-artifact bypass | Yes, as a cheap gate | Previously expensive; now guarded | Ask for the diff, changed files, PR, or exact target. Do not use shell fallback. |
 | Small repo plus exact file/symbol | Bypass | No | Router marks this as negative control | Use native narrow read/search. |
 | Exact class/method/line-level flow trace | Native narrow search/read | Usually no | Hybrid double-spend risk | Use narrow search/read directly unless you need a broad context summary first. |
 | Exact bug trace / tracebug with known target | Native narrow search/read | No | Hybrid double-spend risk | Start from failing test, stack frame, file, symbol, or repro path. Use `tokenopt_failure_packet` only for long failure output. |
 | Simple non-repo question or tiny command | Bypass | No | Not a TokenOpt workload | Answer directly or run the tiny command. |
+
+## Code Review Playbook
+
+Use this shape for normal PR/code review prompts, including `/review-code`.
+
+```text
+Review this PR/diff in two phases:
+1. Technical review: correctness, regressions, security, performance, reliability, compatibility, and maintainability.
+2. Business/test coverage review: requirement coverage, edge cases, and ISTQB-style test design.
+
+Use the net PR diff and PR merge/head worktree for any follow-up reads/searches.
+If the user provides a review checklist, treat it as a required review rubric and return checklist coverage item by item.
+Do not review per-commit patch output as the final PR state.
+Return compact JSON with:
+technical_review, business_review, istqb_checks, user_checklist, review_status, evidence_contract_pass, acquisition_mode, notes.
+```
+
+Technical review rules:
+
+- Report only introduced, actionable defects.
+- If TokenOpt evidence includes `recall_probe` facts, adjudicate each checked probe as a technical finding, coverage gap, or explicit non-issue with contrary evidence. Promote P1/P2 `technical_finding_candidate=true` probes unless contrary evidence disproves them.
+- Before returning no findings, explicitly check changed invariants, effective config/policy math, parser/encoding boundaries, backwards compatibility, concurrency/async behavior, resource lifecycle, null/error paths, and call replacements.
+- Do not downgrade a proven regression into a missing-test or business coverage gap.
+- Security/domain words such as `security`, `auth`, `privilege`, or `permission` do not by themselves mean `/security-audit`; use security-audit only when the user explicitly asks for a security audit/review or vulnerability scan.
+
+Business/test coverage rules:
+
+- Keep coverage gaps separate from technical findings.
+- Apply ISTQB-style dimensions where relevant: boundary values, equivalence partitions, negative/error cases, state transitions, concurrency/async, and compatibility/backward compatibility.
+- Tie every suggested test to the changed behavior and expected business rule.
+- Missing tests are usually `comment`, not `request_changes`, unless the risky behavior is untested enough to make the patch unsafe.
+
+User checklist rules:
+
+- Preserve the user's checklist items as explicit review obligations.
+- For each item, return `pass`, `fail`, `gap`, or `not_applicable` plus evidence or a short reason.
+- A checklist item can raise a technical finding only when the diff introduces an actionable defect; otherwise report it as coverage/commentary.
+- User checklist items add coverage, but they do not suppress higher-severity defects found outside the checklist.
+
+Review benchmark lessons:
+
+- Hadoop #8511: both baseline and TokenOpt found a real exceptional-path resource lifecycle issue; the review checklist should keep async/resource lifecycle explicit.
+- Hadoop #8541: TokenOpt missed a stale-interval config invariant regression; review prompts must force invariant/effective-policy checks before "no findings".
+- Elasticsearch #151093: Unicode/surrogate language-equivalence was a plausible miss; parser/encoding boundary checks matter for security/authorization code.
 
 Aggregate from that benchmark:
 

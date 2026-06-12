@@ -1,4 +1,5 @@
 import type { CompressionResult } from "../types.js";
+import { estimateTokensSaved } from "../token-estimator.js";
 
 const DROP_PATTERNS = [
   /^\s*Downloading from /i,
@@ -75,7 +76,7 @@ export function compressBuildLog(text: string, limitChars: number): CompressionR
     text: capped,
     originalChars: normalized.length,
     compressedChars: capped.length,
-    estimatedTokensSaved: Math.ceil(Math.max(0, normalized.length - capped.length) / 4)
+    estimatedTokensSaved: estimateTokensSaved(normalized.length, capped.length)
   };
 }
 

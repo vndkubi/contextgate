@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { compileCodingCoverageEvidence } from "../dist/coding/coverage-contract.js";
 import { parseFailurePacket } from "../dist/coding/failure-packet.js";
-import { buildSymbolPacket, findCodingSymbols } from "../dist/coding/symbol-index.js";
+import { buildSymbolPacket, findCodingSymbols, getCodingSymbolIndexStats } from "../dist/coding/symbol-index.js";
 import { findTestNeighbors } from "../dist/coding/test-neighbors.js";
 
 function makeCodingFixture() {
@@ -87,6 +87,34 @@ test("regex-lite symbol scanner extracts TS, Java, and Python symbols", () => {
   const pythonSymbols = findCodingSymbols({ repoRoot: repo, query: "IntegrationBase normalize_key" });
   assert.equal(pythonSymbols.some((symbol) => symbol.name === "IntegrationBase" && symbol.language === "python"), true);
   assert.equal(pythonSymbols.some((symbol) => symbol.name === "normalize_key" && symbol.kind === "function"), true);
+});
+
+test("persistent symbol index reuses cache and rebuilds after source changes", () => {
+  const repo = makeCodingFixture();
+  const first = getCodingSymbolIndexStats(repo, { forceRebuild: true });
+  assert.equal(first.cacheHit, false);
+  assert.ok(first.fileCount >= 4);
+  assert.ok(first.symbolCount >= 5);
+  assert.equal(fs.existsSync(first.cachePath), true);
+
+  const second = getCodingSymbolIndexStats(repo);
+  assert.equal(second.cacheHit, true);
+  assert.equal(second.symbolCount, first.symbolCount);
+
+  fs.writeFileSync(
+    path.join(repo, "src", "orders", "OrderPolicy.ts"),
+    [
+      "export class OrderPolicy {",
+      "  canAuthorize(orderId: string): boolean {",
+      "    return orderId.length > 0;",
+      "  }",
+      "}"
+    ].join("\n")
+  );
+
+  const rebuilt = getCodingSymbolIndexStats(repo);
+  assert.equal(rebuilt.cacheHit, false);
+  assert.ok(rebuilt.symbolCount > first.symbolCount);
 });
 
 test("symbol packet includes definition, dependencies, callers, callees, and nearby tests", () => {

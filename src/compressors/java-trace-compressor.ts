@@ -1,4 +1,5 @@
 import type { CompressionResult } from "../types.js";
+import { estimateTokensSaved } from "../token-estimator.js";
 
 const FRAME_LIMIT = 12;
 const FRAME_PATTERN = /^\s*at\s+([A-Za-z_$][\w$]*\.)+[A-Za-z_$][\w$]*\([^)]*\)/;
@@ -73,7 +74,7 @@ export function compressJavaTrace(text: string, limitChars: number): Compression
     text: capped,
     originalChars: normalized.length,
     compressedChars: capped.length,
-    estimatedTokensSaved: Math.ceil(Math.max(0, normalized.length - capped.length) / 4)
+    estimatedTokensSaved: estimateTokensSaved(normalized.length, capped.length, { kind: "java" })
   };
 }
 

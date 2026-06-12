@@ -139,5 +139,11 @@ test("instruction graph planner emits root and path-specific files", () => {
   assert.equal(files.some((file) => file.endsWith(".github/copilot-instructions.md")), true);
   assert.equal(files.some((file) => file.endsWith("tokenopt-review.instructions.md")), true);
   assert.equal(files.some((file) => file.endsWith("tokenopt-runtime.instructions.md")), true);
+  const reviewInstructions = plan.files.find((file) => file.path.endsWith(path.join(".github", "instructions", "tokenopt-review.instructions.md")));
+  assert.match(reviewInstructions.content, /two phases/i);
+  assert.match(reviewInstructions.content, /effective config\/policy math/);
+  assert.match(reviewInstructions.content, /ISTQB dimensions/);
+  assert.match(reviewInstructions.content, /user provides a review checklist/);
+  assert.match(reviewInstructions.content, /pass, fail, gap, or not_applicable/);
   assert.ok(plan.totalEstimatedTokens > 0);
 });

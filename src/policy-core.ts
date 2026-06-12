@@ -207,7 +207,9 @@ function evaluatePostToolUse(event: TokenOptEvent, config: TokenOptConfig): Poli
     metadata: {
       kind: compressed.kind,
       originalChars: compressed.originalChars,
-      compressedChars: compressed.compressedChars
+      compressedChars: compressed.compressedChars,
+      compressionBudgetChars: compressed.budget?.maxChars,
+      compressionBudgetReason: compressed.budget?.reason
     }
   };
 }

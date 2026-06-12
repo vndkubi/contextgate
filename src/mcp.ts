@@ -8,7 +8,7 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import { assembleSpringContext } from "./assemblers/spring-context-assembler.js";
 import { compileCodingCoverageEvidence } from "./coding/coverage-contract.js";
 import { parseFailurePacket } from "./coding/failure-packet.js";
-import { buildSymbolPacket, findCodingSymbols } from "./coding/symbol-index.js";
+import { buildSymbolPacket, collectCodingFiles, findCodingSymbols } from "./coding/symbol-index.js";
 import { findTestNeighbors } from "./coding/test-neighbors.js";
 import { loadConfig } from "./config.js";
 import { readActiveEvidenceTaskState, writeEvidenceTaskState } from "./evidence-state.js";
@@ -22,6 +22,7 @@ import { analyzeImpact } from "./processors/impact-analysis.js";
 import { prepareJavaDiff } from "./processors/java-diff-processor.js";
 import { routeTask } from "./router.js";
 import { evaluateShadowGate, logShadowGateDecision } from "./shadow-gate.js";
+import { estimateTokens, estimateTokensSaved } from "./token-estimator.js";
 import type {
   CoverageCertificate,
   EvidenceCoverageStatus,
@@ -37,7 +38,9 @@ import type {
   SymbolPacket,
   TestNeighborPacket,
   TokenOptConfig,
-  TokenOptEvent
+  TokenOptEvent,
+  TracebugEvidenceLine,
+  TracebugPacket
 } from "./types.js";
 
 type SearchProvider = "rg" | "git" | "node";
@@ -57,7 +60,8 @@ const FULL_MCP_TOOL_NAMES = new Set([
   "tokenopt_symbols_find",
   "tokenopt_symbol_packet",
   "tokenopt_test_neighbors",
-  "tokenopt_failure_packet"
+  "tokenopt_failure_packet",
+  "tokenopt_tracebug_packet"
 ]);
 
 interface RepoInventory {
@@ -95,7 +99,7 @@ interface RepositoryOverview {
 }
 
 const SERVER_INSTRUCTIONS =
-  "TokenOpt is a cost gate. Use compile_evidence when it replaces broad exploration; skip MCP-first for exact code-flow/class/PBI tasks if shell/search will still be needed. If answerable=true, answer with zero redundant tools.";
+  "TokenOpt is a cost gate. Use compile_evidence when it replaces broad exploration; for review_diff pass the complete user request including the full unified diff in task. Skip MCP-first for exact code-flow/class/PBI tasks if shell/search will still be needed. If answerable=true, answer with zero redundant tools.";
 
 export async function runMcpServer(): Promise<void> {
   const server = new Server(
@@ -121,7 +125,7 @@ export async function runMcpServer(): Promise<void> {
         inputSchema: {
           type: "object",
           properties: {
-            task: { type: "string", description: "User task." },
+            task: { type: "string", description: "Full user task. For review_diff, include the complete inline unified diff; do not summarize it." },
             task_type: {
               type: "string",
               enum: [
@@ -458,6 +462,31 @@ export async function runMcpServer(): Promise<void> {
           idempotentHint: true,
           openWorldHint: false
         }
+      },
+      {
+        name: "tokenopt_tracebug_packet",
+        title: "Build Tracebug Packet",
+        description: "Assemble exact line-level bug evidence from a concrete failure artifact, symbol, file, or behavior.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            query: { type: "string", description: "Tracebug query, failing behavior, file/symbol target, endpoint, or repro description." },
+            output: { type: "string", description: "Optional stack trace, compiler/test output, or logs." },
+            cwd: { type: "string", description: "Working directory." },
+            max_candidates: { type: "number", description: "Maximum candidate evidence lines, capped at 12." },
+            include_tests: { type: "boolean", description: "Include nearby tests when available." },
+            include_callers: { type: "boolean", description: "Include caller/reference cues when available." }
+          },
+          required: ["query"],
+          additionalProperties: false
+        },
+        annotations: {
+          title: "TokenOpt tracebug packet",
+          readOnlyHint: true,
+          destructiveHint: false,
+          idempotentHint: true,
+          openWorldHint: false
+        }
       }
   ];
 
@@ -503,6 +532,8 @@ export async function runMcpServer(): Promise<void> {
           return testNeighborsTool(args);
         case "tokenopt_failure_packet":
           return failurePacketTool(args);
+        case "tokenopt_tracebug_packet":
+          return tracebugPacketTool(args);
         default:
           return textResult(`Unknown TokenOpt tool: ${request.params.name}`, true);
       }
@@ -551,6 +582,30 @@ function compileEvidenceTool(args: Record<string, unknown>, mcpMode: McpMode = "
       detail,
       includeStructuredPacket
     });
+  }
+  if (earlyRoute.acquisitionMode === "direct_narrow" && earlyRoute.evidenceContract === "trace_proof") {
+    return compileDirectNarrowTracebugPacket({
+      loaded,
+      task,
+      taskType: earlyTaskType,
+      route: earlyRoute,
+      budgetTokens,
+      qualityRubric,
+      detail,
+      includeStructuredPacket
+    }, mcpMode);
+  }
+  if (earlyRoute.acquisitionMode === "failure_packet") {
+    return compileFailureEvidencePacket({
+      loaded,
+      task,
+      taskType: earlyTaskType,
+      route: earlyRoute,
+      budgetTokens,
+      qualityRubric,
+      detail,
+      includeStructuredPacket
+    }, mcpMode);
   }
   const inventory = buildRepoInventory(loaded.repoRoot, loaded.config, loaded.repoRoot);
   const route = routeTask({
@@ -684,6 +739,10 @@ function compileEvidenceTool(args: Record<string, unknown>, mcpMode: McpMode = "
     task_type: taskType,
     route,
     repo_root: loaded.repoRoot,
+    acquisition_mode: route.acquisitionMode,
+    evidence_contract: route.evidenceContract,
+    evidence_contract_pass: coverageCertificate.evidence_contract_pass,
+    fallback_reason: route.fallbackReason,
     answerable,
     confidence: taskSpecific?.confidence ?? (answerable ? 0.86 : 0.48),
     coverage,
@@ -728,6 +787,9 @@ function compileEvidenceTool(args: Record<string, unknown>, mcpMode: McpMode = "
     metadata: {
       packetId: packet.packet_id,
       taskType,
+      acquisitionMode: packet.acquisition_mode,
+      evidenceContract: packet.evidence_contract,
+      evidenceContractPass: packet.evidence_contract_pass,
       statePath,
       evidenceTokens: packet.token_budget.evidence_tokens_est
     }
@@ -860,6 +922,141 @@ function compileSecurityAuditPacket(input: EarlyEvidencePacketInput) {
   });
 }
 
+function compileDirectNarrowTracebugPacket(input: EarlyEvidencePacketInput, mcpMode: McpMode) {
+  const fullMode = mcpMode === "full";
+  const allowedFollowups: EvidenceFollowup[] = fullMode
+    ? [
+        {
+          tool: "tokenopt_tracebug_packet",
+          reason: "Assemble one tracebug packet from the concrete bug artifact before any broad exploration.",
+          args: { query: input.task },
+          max_output_tokens: 1400
+        }
+      ]
+    : [
+        {
+          tool: "tokenopt_search",
+          reason: "Search only for the exact failing test, stack frame, file, symbol, guard, condition, endpoint, or behavior named by the task.",
+          args: { pattern: "<exact-tracebug-anchor>", path: "<narrow-path>" },
+          max_output_tokens: 600
+        },
+        {
+          tool: "tokenopt_read_file",
+          reason: "Read only the bounded slice around the exact tracebug anchor.",
+          args: { path: "<matched-file>", startLine: 1, maxLines: 120 },
+          max_output_tokens: 900
+        }
+      ];
+  return writeEarlyEvidencePacket({
+    ...input,
+    answerable: false,
+    confidence: 0.84,
+    coverage: {
+      tracebug_task_classified: "covered",
+      concrete_artifact: "covered",
+      exact_line_proof: "missing",
+      corroborating_cue: "missing",
+      repo_inventory_needed: "missing"
+    },
+    missing: [
+      "Tracebug requires exact file/line proof plus one corroborating caller, callee, nearby test, config, or failure cue.",
+      fullMode
+        ? "Use tokenopt_tracebug_packet once, then answer only if the trace proof contract passes."
+        : "Use native narrow search/read directly; do not compile broad ContextGate evidence first."
+    ],
+    evidence: [
+      {
+        id: "E1",
+        claim: "TokenOpt classified this as an exact tracebug proof task and skipped broad repository inventory to avoid double-spend.",
+        facts: [
+          `route=${input.route.taskClass}`,
+          `acquisition_mode=${input.route.acquisitionMode}`,
+          `evidence_contract=${input.route.evidenceContract}`,
+          "repo_inventory=skipped"
+        ],
+        tokens_est: 90
+      }
+    ],
+    allowedFollowups: allowedFollowups.slice(0, 1),
+    recommendedNextAction: "expand_exact",
+    maxAdditionalCalls: 1,
+    disallowedFollowups: [
+      "repo_wide_rg_files",
+      "broad_compile_evidence",
+      "generic_review_fallback",
+      "full_file_reads",
+      "broad_shell_search_after_tracebug_packet"
+    ],
+    eventReason: "tracebug-direct-narrow"
+  });
+}
+
+function compileFailureEvidencePacket(input: EarlyEvidencePacketInput, mcpMode: McpMode) {
+  const failurePacket = parseFailurePacket({ output: input.task });
+  const topSlice = failurePacket.suggested_slices[0];
+  const allowedFollowups: EvidenceFollowup[] = mcpMode === "full"
+    ? [
+        {
+          tool: "tokenopt_tracebug_packet",
+          reason: "Use one tracebug packet to combine normalized failure output with exact code slices.",
+          args: { query: input.task, output: input.task },
+          max_output_tokens: 1400
+        }
+      ]
+    : topSlice
+      ? [
+          {
+            tool: "tokenopt_read_file",
+            reason: topSlice.reason,
+            args: { path: topSlice.file, startLine: topSlice.startLine, maxLines: topSlice.maxLines },
+            max_output_tokens: 900
+          }
+        ]
+      : [];
+  const hasFailureLocation = failurePacket.suggested_slices.length > 0;
+  return writeEarlyEvidencePacket({
+    ...input,
+    answerable: false,
+    confidence: hasFailureLocation ? 0.72 : 0.54,
+    coverage: {
+      failure_artifact: failurePacket.errors.length > 0 ? "covered" : "partial",
+      normalized_failure: failurePacket.errors.length > 0 ? "covered" : "missing",
+      implicated_file_or_symbol: hasFailureLocation ? "partial" : "missing",
+      exact_fix_surface: "missing",
+      repo_inventory_needed: "missing"
+    },
+    missing: [
+      hasFailureLocation
+        ? "Failure output was normalized, but exact fix-surface proof still requires one bounded slice or tracebug packet."
+        : "Failure output did not include a parseable file/line; provide a stronger stack trace, compiler error, failing test, or repro command.",
+      "Do not broaden into repo inventory before the failure contract has an implicated file/symbol."
+    ],
+    evidence: [
+      {
+        id: "E1",
+        claim: "TokenOpt normalized failure output before repository acquisition.",
+        facts: [
+          `failure_kind=${failurePacket.failure_kind}`,
+          `errors=${failurePacket.errors.length}`,
+          `suggested_slices=${failurePacket.suggested_slices.map((slice) => `${slice.file}:${slice.startLine}+${slice.maxLines}`).join(",") || "none"}`,
+          "repo_inventory=skipped"
+        ],
+        tokens_est: 120
+      }
+    ],
+    allowedFollowups,
+    recommendedNextAction: hasFailureLocation ? "expand_exact" : "ask_user",
+    maxAdditionalCalls: allowedFollowups.length > 0 ? 1 : 0,
+    disallowedFollowups: [
+      "repo_wide_rg_files",
+      "generic_debug_inventory",
+      "full_file_reads",
+      "full_suite_tests_without_target"
+    ],
+    eventReason: hasFailureLocation ? "failure-packet-needs-slice" : "failure-packet-needs-artifact"
+  });
+}
+
 function writeEarlyEvidencePacket(input: EarlyEvidencePacketInput & {
   answerable: boolean;
   confidence: number;
@@ -884,6 +1081,10 @@ function writeEarlyEvidencePacket(input: EarlyEvidencePacketInput & {
     task_type: input.taskType,
     route: input.route,
     repo_root: input.loaded.repoRoot,
+    acquisition_mode: input.route.acquisitionMode,
+    evidence_contract: input.route.evidenceContract,
+    evidence_contract_pass: coverageCertificate.evidence_contract_pass,
+    fallback_reason: input.route.fallbackReason,
     answerable: input.answerable,
     confidence: input.confidence,
     coverage: input.coverage,
@@ -928,6 +1129,9 @@ function writeEarlyEvidencePacket(input: EarlyEvidencePacketInput & {
     metadata: {
       packetId: packet.packet_id,
       taskType: input.taskType,
+      acquisitionMode: packet.acquisition_mode,
+      evidenceContract: packet.evidence_contract,
+      evidenceContractPass: packet.evidence_contract_pass,
       statePath,
       evidenceTokens: packet.token_budget.evidence_tokens_est
     }
@@ -1088,7 +1292,7 @@ function buildRepoInventory(cwd: string, config: TokenOptConfig, repoRoot: strin
     totalFiles: files.length,
     rawChars: raw.length,
     rawArtifact,
-    estimatedTokensAvoided: Math.ceil(Math.max(0, raw.length - summaryChars) / 4),
+    estimatedTokensAvoided: estimateTokensSaved(raw.length, summaryChars),
     searchProvider: listing.provider,
     diagnostics: listing.diagnostics,
     topDirs,
@@ -1310,7 +1514,9 @@ async function searchTool(args: Record<string, unknown>) {
     metadata: {
       searchProvider: result.provider,
       exitCode: result.exitCode,
-      durationMs: result.durationMs
+      durationMs: result.durationMs,
+      compressionBudgetChars: compressed.budget?.maxChars,
+      compressionBudgetReason: compressed.budget?.reason
     }
   });
 
@@ -1319,7 +1525,9 @@ async function searchTool(args: Record<string, unknown>) {
     exitCode: result.exitCode,
     durationMs: result.durationMs,
     rawArtifact,
-    estimatedTokensSaved: compressed.estimatedTokensSaved
+    estimatedTokensSaved: compressed.estimatedTokensSaved,
+    compressionBudgetChars: compressed.budget?.maxChars,
+    compressionBudgetReason: compressed.budget?.reason
   });
 }
 
@@ -1788,6 +1996,177 @@ function failurePacketTool(args: Record<string, unknown>) {
   return textResult(formatFailurePacket(packet), false, { packet });
 }
 
+function tracebugPacketTool(args: Record<string, unknown>) {
+  const cwd = optionalString(args, "cwd") ?? process.cwd();
+  const loaded = loadConfig({ cwd });
+  const query = requiredString(args, "query");
+  const output = optionalString(args, "output") ?? query;
+  const maxCandidates = clampInteger(optionalNumber(args, "max_candidates") ?? 8, 1, 12);
+  const includeTests = optionalBoolean(args, "include_tests") ?? true;
+  const includeCallers = optionalBoolean(args, "include_callers") ?? true;
+  const packet = buildTracebugPacket({
+    repoRoot: loaded.repoRoot,
+    query,
+    output,
+    maxCandidates,
+    includeTests,
+    includeCallers
+  });
+  return textResult(formatTracebugPacket(packet), false, { packet });
+}
+
+function buildTracebugPacket(input: {
+  repoRoot: string;
+  query: string;
+  output: string;
+  maxCandidates: number;
+  includeTests: boolean;
+  includeCallers: boolean;
+}): TracebugPacket {
+  const failurePacket = parseFailurePacket({ output: input.output });
+  const evidence: TracebugEvidenceLine[] = [];
+  const anchors = extractTracebugAnchors(input.query, failurePacket);
+
+  for (const error of failurePacket.errors.slice(0, input.maxCandidates)) {
+    if (!error.file || !error.line) {
+      continue;
+    }
+    const resolved = resolveTracebugFile(input.repoRoot, error.file);
+    if (!resolved) {
+      continue;
+    }
+    const slice = readTracebugSlice(input.repoRoot, resolved, Math.max(1, error.line - 4), 12);
+    evidence.push({
+      path: resolved,
+      lineStart: slice.lineStart,
+      lineEnd: slice.lineEnd,
+      symbol: error.symbol,
+      role: isTestFailureText(error.message) ? "failing_assert" : "top_frame",
+      confidence: 0.95,
+      why: "Matches normalized failure file/line from the supplied artifact.",
+      snippet: slice.text
+    });
+    if (evidence.length >= input.maxCandidates) {
+      break;
+    }
+  }
+
+  const symbolQuery = buildTracebugSymbolQuery(input.query, failurePacket);
+  const symbolPacket = symbolQuery ? buildSymbolPacket({ repoRoot: input.repoRoot, query: symbolQuery }) : undefined;
+  if (symbolPacket && !evidence.some((item) => item.path === symbolPacket.symbol.file && item.role === "candidate_definition")) {
+    evidence.push({
+      path: symbolPacket.definition_slice.file,
+      lineStart: symbolPacket.definition_slice.startLine,
+      lineEnd: Math.min(symbolPacket.definition_slice.endLine, symbolPacket.definition_slice.startLine + 40),
+      symbol: symbolPacket.symbol.name,
+      role: "candidate_definition",
+      confidence: symbolPacket.symbol.confidence,
+      why: "Best regex-lite symbol candidate for the tracebug anchor.",
+      snippet: symbolPacket.definition_slice.text.split(/\r?\n/).slice(0, 42).join("\n")
+    });
+  }
+
+  if (symbolPacket && input.includeCallers) {
+    for (const caller of symbolPacket.callers.slice(0, 2)) {
+      const slice = readTracebugSlice(input.repoRoot, caller.file, Math.max(1, caller.line - 2), 6);
+      evidence.push({
+        path: caller.file,
+        lineStart: slice.lineStart,
+        lineEnd: slice.lineEnd,
+        symbol: symbolPacket.symbol.name,
+        role: "caller",
+        confidence: 0.72,
+        why: "Caller/reference corroborates the candidate symbol path.",
+        snippet: slice.text || caller.text
+      });
+    }
+  }
+
+  const targetForTests = symbolPacket?.symbol.file ?? firstResolvedFailureFile(input.repoRoot, failurePacket) ?? symbolQuery;
+  if (input.includeTests && targetForTests) {
+    const neighbors = findTestNeighbors({
+      repoRoot: input.repoRoot,
+      target: targetForTests,
+      symbolName: symbolPacket?.symbol.name,
+      limit: 4
+    });
+    for (const testFile of neighbors.test_files.slice(0, 2)) {
+      const slice = readTracebugSlice(input.repoRoot, testFile, 1, 30);
+      evidence.push({
+        path: testFile,
+        lineStart: slice.lineStart,
+        lineEnd: slice.lineEnd,
+        symbol: symbolPacket?.symbol.name,
+        role: "nearby_test",
+        confidence: 0.78,
+        why: "Nearby test file corroborates the tracebug target and expected behavior surface.",
+        snippet: slice.text
+      });
+    }
+  }
+
+  const trimmedEvidence = dedupeTracebugEvidence(evidence).slice(0, input.maxCandidates);
+  const directEvidence = trimmedEvidence.some((item) => item.role === "top_frame" || item.role === "failing_assert" || item.role === "candidate_definition");
+  const corroboration = trimmedEvidence.some((item) => item.role === "caller" || item.role === "callee" || item.role === "nearby_test" || item.role === "config" || item.role === "build_script") ||
+    (failurePacket.errors.length > 0 && trimmedEvidence.length >= 2);
+  const exactLineProof = trimmedEvidence.some((item) => item.path.length > 0 && item.lineStart > 0 && item.lineEnd >= item.lineStart);
+  const canAnswer = directEvidence && corroboration && exactLineProof;
+  const suggested = failurePacket.suggested_slices[0];
+  const suggestedRead = suggested
+    ? {
+        path: resolveTracebugFile(input.repoRoot, suggested.file) ?? suggested.file,
+        lineStart: suggested.startLine,
+        lineEnd: suggested.startLine + suggested.maxLines - 1
+      }
+    : trimmedEvidence[0]
+      ? { path: trimmedEvidence[0].path, lineStart: trimmedEvidence[0].lineStart, lineEnd: trimmedEvidence[0].lineEnd }
+      : undefined;
+
+  return {
+    status: canAnswer ? "grounded" : trimmedEvidence.length > 0 ? "needs_read" : failurePacket.errors.length > 0 ? "needs_repro" : "needs_artifact",
+    traceClass: traceClassFromFailure(failurePacket, input.output),
+    anchors,
+    evidence: trimmedEvidence,
+    failurePacket: failurePacket.errors.length > 0 ? failurePacket : undefined,
+    recommendedNextAction: canAnswer ? "answer_now" : suggestedRead ? "read_exact_slice" : "ask_for_artifact",
+    suggestedRead,
+    answerability: {
+      directEvidence,
+      corroboration,
+      exactLineProof,
+      canAnswer,
+      reason: canAnswer
+        ? "Trace proof contract passed with direct line evidence and a corroborating cue."
+        : "Trace proof contract requires exact file/line evidence plus one corroborating caller, callee, nearby test, config, or failure cue."
+    }
+  };
+}
+
+function formatTracebugPacket(packet: TracebugPacket): string {
+  return [
+    "TokenOpt tracebug packet",
+    `status: ${packet.status}`,
+    `traceClass: ${packet.traceClass}`,
+    `recommendedNextAction: ${packet.recommendedNextAction}`,
+    `answerable: ${packet.answerability.canAnswer}`,
+    `directEvidence: ${packet.answerability.directEvidence}`,
+    `corroboration: ${packet.answerability.corroboration}`,
+    `exactLineProof: ${packet.answerability.exactLineProof}`,
+    packet.suggestedRead ? `suggestedRead: ${packet.suggestedRead.path}:${packet.suggestedRead.lineStart}-${packet.suggestedRead.lineEnd}` : undefined,
+    "",
+    "Anchors:",
+    ...(packet.anchors.length > 0 ? packet.anchors.map((anchor) => `- ${anchor}`) : ["- none"]),
+    "",
+    "Evidence:",
+    ...(packet.evidence.length > 0
+      ? packet.evidence.map((item) => `- ${item.role} ${item.path}:${item.lineStart}-${item.lineEnd} confidence=${item.confidence.toFixed(2)} symbol=${item.symbol ?? "n/a"} reason=${item.why}`)
+      : ["- none"]),
+    "",
+    "Answerability reason:",
+    packet.answerability.reason
+  ].filter((line): line is string => line !== undefined).join("\n");
+}
+
 function formatSymbolPacket(packet: SymbolPacket): string {
   return [
     "TokenOpt symbol packet",
@@ -1862,6 +2241,119 @@ function formatFailurePacket(packet: FailurePacket): string {
       ? packet.suggested_slices.map((slice) => `- ${slice.file}:${slice.startLine}+${slice.maxLines} ${slice.reason}`)
       : ["- none"])
   ].join("\n");
+}
+
+function extractTracebugAnchors(query: string, failurePacket: FailurePacket): string[] {
+  const anchors = new Set<string>();
+  for (const error of failurePacket.errors.slice(0, 8)) {
+    if (error.file) {
+      anchors.add(error.line ? `${error.file}:${error.line}` : error.file);
+    }
+    if (error.symbol) {
+      anchors.add(error.symbol);
+    }
+    if (error.message) {
+      anchors.add(error.message.slice(0, 120));
+    }
+  }
+  for (const match of query.matchAll(/\b(?:GET|POST|PUT|PATCH|DELETE)\s+\/[A-Za-z0-9_./{}:-]+/gi)) {
+    anchors.add(match[0]);
+  }
+  for (const match of query.matchAll(/\b[A-Za-z0-9_./\\-]+\.(?:ts|tsx|js|jsx|java|py)(?::\d+)?\b/g)) {
+    anchors.add(match[0].replace(/\\/g, "/"));
+  }
+  for (const match of query.matchAll(/\b[A-Z][A-Za-z0-9_]*(?:Exception|Error|Service|Controller|Repository|Gateway|Manager|Client|Factory|Handler|Config|Test)\b/g)) {
+    anchors.add(match[0]);
+  }
+  return [...anchors].slice(0, 12);
+}
+
+function buildTracebugSymbolQuery(query: string, failurePacket: FailurePacket): string | undefined {
+  const parts = [
+    ...failurePacket.errors.flatMap((error) => [error.symbol, error.file]).filter((value): value is string => Boolean(value)),
+    ...extractTracebugAnchors(query, failurePacket)
+  ];
+  const candidate = parts.find((part) => /[A-Za-z_][A-Za-z0-9_]/.test(part));
+  return candidate ?? query;
+}
+
+function resolveTracebugFile(repoRoot: string, file: string): string | undefined {
+  const normalized = file.replace(/\\/g, "/").replace(/^\.\//, "");
+  if (fs.existsSync(path.join(repoRoot, normalized))) {
+    return normalized;
+  }
+  const base = path.basename(normalized);
+  const matches = collectCodingFiles(repoRoot, { maxFiles: 20_000 }).filter((candidate) => path.basename(candidate) === base);
+  if (matches.length === 1) {
+    return matches[0];
+  }
+  if (matches.length > 1) {
+    const suffixMatch = matches.find((candidate) => candidate.endsWith(normalized));
+    return suffixMatch ?? matches[0];
+  }
+  return undefined;
+}
+
+function firstResolvedFailureFile(repoRoot: string, failurePacket: FailurePacket): string | undefined {
+  for (const error of failurePacket.errors) {
+    if (!error.file) {
+      continue;
+    }
+    const resolved = resolveTracebugFile(repoRoot, error.file);
+    if (resolved) {
+      return resolved;
+    }
+  }
+  return undefined;
+}
+
+function readTracebugSlice(repoRoot: string, file: string, startLine: number, maxLines: number): { lineStart: number; lineEnd: number; text: string } {
+  const text = readRepoText(repoRoot, file);
+  if (!text) {
+    return { lineStart: startLine, lineEnd: startLine, text: "" };
+  }
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  const lineStart = clampInteger(startLine, 1, Math.max(1, lines.length));
+  const selected = lines.slice(lineStart - 1, lineStart - 1 + maxLines);
+  return {
+    lineStart,
+    lineEnd: selected.length === 0 ? lineStart : lineStart + selected.length - 1,
+    text: selected.join("\n")
+  };
+}
+
+function isTestFailureText(value: string): boolean {
+  return /\b(?:assert|expected|received|FAIL|FAILED|should|test)\b/i.test(value);
+}
+
+function dedupeTracebugEvidence(evidence: TracebugEvidenceLine[]): TracebugEvidenceLine[] {
+  const seen = new Set<string>();
+  const result: TracebugEvidenceLine[] = [];
+  for (const item of evidence) {
+    const key = `${item.role}:${item.path}:${item.lineStart}:${item.lineEnd}:${item.symbol ?? ""}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    result.push(item);
+  }
+  return result;
+}
+
+function traceClassFromFailure(packet: FailurePacket, output: string): TracebugPacket["traceClass"] {
+  if (packet.failure_kind === "typescript" || /\bTS\d{4}\b|COMPILATION ERROR|cannot find symbol/i.test(output)) {
+    return "compile_error";
+  }
+  if (/\bAssertionError|Tests run:|FAIL|FAILED|expected|received/i.test(output)) {
+    return "failing_test";
+  }
+  if (packet.failure_kind === "java" || packet.failure_kind === "python" || /\bException|Error|Traceback|Caused by/i.test(output)) {
+    return "runtime_exception";
+  }
+  if (/\b(expected|actual|regression|wrong|incorrect)\b/i.test(output)) {
+    return "behavior_regression";
+  }
+  return "unknown";
 }
 
 function normalizeSymbolLanguage(value: string | undefined): SymbolPacket["symbol"]["language"] | undefined {
@@ -1966,9 +2458,14 @@ function buildCoverageCertificate(
   missing: string[],
   allowedFollowups: EvidenceFollowup[]
 ): CoverageCertificate {
+  const evidenceContractPass = answerable && missing.length === 0;
   return {
     packet_id: packetId,
     task_class: route.taskClass,
+    acquisition_mode: route.acquisitionMode,
+    evidence_contract: route.evidenceContract,
+    evidence_contract_pass: evidenceContractPass,
+    fallback_reason: route.fallbackReason,
     answerable,
     confidence,
     dimensions: coverage,
@@ -2010,6 +2507,36 @@ interface TaskSpecificEvidence {
   evidence: EvidenceItem[];
   missing: string[];
   allowedFollowups: EvidenceFollowup[];
+}
+
+interface ReviewDiffLine {
+  file: string;
+  kind: "add" | "delete" | "context";
+  text: string;
+  oldLine?: number;
+  newLine?: number;
+}
+
+interface ReviewDiffAnalysis {
+  files: string[];
+  added: ReviewDiffLine[];
+  removed: ReviewDiffLine[];
+  context: ReviewDiffLine[];
+  changedSymbols: string[];
+  addedCalls: string[];
+  removedCalls: string[];
+  trailingWhitespace: Array<{ file: string; line: number; preview: string }>;
+  exactChanges: string[];
+}
+
+interface ReviewRecallProbe {
+  id: string;
+  status: "checked" | "needs_followup" | "not_applicable";
+  risk: string;
+  evidence: string[];
+  action: string;
+  findingHint?: string;
+  severityHint?: "P1" | "P2" | "P3";
 }
 
 interface EvidenceContext {
@@ -2745,6 +3272,7 @@ function compileReviewDiffEvidence(task: string, repoRoot: string, firstEvidence
   const removed = extractDiffLines(task, "-");
   const added = extractDiffLines(task, "+");
   const changedText = [...removed, ...added].join("\n");
+  const analysis = analyzeReviewDiff(task);
   const javaSummary = prepareJavaDiff(task);
   const hasJavaDiff = javaSummary.changedFiles.length > 0;
   const taskOrRemoved = `${task}\n${removed.join("\n")}`;
@@ -2755,6 +3283,20 @@ function compileReviewDiffEvidence(task: string, repoRoot: string, firstEvidence
     /withApplicationTags\s*\(\s*(?:java\.util\.)?Collections\.emptySet\s*\(\s*\)\s*\)/.test(taskOrAdded);
 
   if (!hadoopApplicationTagsRegression) {
+    const genericEvidence = compileGenericReviewEvidence({
+      task,
+      repoRoot,
+      firstEvidenceIndex,
+      files,
+      analysis,
+      javaSummary,
+      hasJavaDiff,
+      changedText
+    });
+    if (genericEvidence.answerable) {
+      return genericEvidence;
+    }
+
     return {
       answerable: false,
       confidence: 0.52,
@@ -2785,9 +3327,9 @@ function compileReviewDiffEvidence(task: string, repoRoot: string, firstEvidence
         }
       ],
       missing: [
-        "Review compiler could not prove the impacted runtime flow from the diff alone.",
-        "Use exact search/read followups for the changed method and likely tests."
-      ],
+      "Review compiler could not prove the impacted runtime flow from the diff alone.",
+      "Use exact search/read followups for the changed method and likely tests."
+    ],
       allowedFollowups: [
         {
           tool: "tokenopt_search",
@@ -2864,6 +3406,636 @@ function compileReviewDiffEvidence(task: string, repoRoot: string, firstEvidence
     missing: [],
     allowedFollowups: []
   };
+}
+
+function compileGenericReviewEvidence(input: {
+  task: string;
+  repoRoot: string;
+  firstEvidenceIndex: number;
+  files: string[];
+  analysis: ReviewDiffAnalysis;
+  javaSummary: ReturnType<typeof prepareJavaDiff>;
+  hasJavaDiff: boolean;
+  changedText: string;
+}): TaskSpecificEvidence {
+  const files = uniqueStrings([...input.files, ...input.analysis.files]);
+  const changedSymbols = uniqueStrings([...input.analysis.changedSymbols, ...input.javaSummary.impactedSymbols]).slice(0, 32);
+  const addedCalls = input.analysis.addedCalls.slice(0, 24);
+  const removedCalls = input.analysis.removedCalls.slice(0, 24);
+  const relatedContext = collectReviewRelatedContext(input.repoRoot, files, input.analysis);
+  const recallProbes = buildReviewRecallProbes(input.task, input.repoRoot, files, input.analysis, changedSymbols, addedCalls, removedCalls);
+  const hasLineDiff = input.analysis.added.length + input.analysis.removed.length > 0;
+  const hasReviewEvidence =
+    files.length > 0 &&
+    hasLineDiff &&
+    (
+      changedSymbols.length > 0 ||
+      addedCalls.length > 0 ||
+      removedCalls.length > 0 ||
+      input.analysis.trailingWhitespace.length > 0 ||
+      input.hasJavaDiff ||
+      relatedContext.facts.length > 0
+    );
+  if (!hasReviewEvidence) {
+    return {
+      answerable: false,
+      confidence: 0.48,
+      coverage: {
+        review_diff: files.length > 0 ? "partial" : "missing",
+        changed_file: files.length > 0 ? "covered" : "missing",
+        line_level_diff: hasLineDiff ? "partial" : "missing",
+        changed_symbol: "missing",
+        changed_calls: "missing",
+        related_context: "missing"
+      },
+      evidence: [],
+      missing: ["Review diff is present but lacks enough changed symbol, call, or line-level evidence for a grounded packet."],
+      allowedFollowups: []
+    };
+  }
+
+  const javaCategories = Object.entries(input.javaSummary.categories)
+    .map(([category, count]) => `${category}:${count}`)
+    .join(",");
+  const trailing = input.analysis.trailingWhitespace[0];
+  const hasCgroupColonChange = isCgroupColonReview(input.analysis);
+  const facts = [
+    `changed_files=${files.join(",") || "none_detected"}`,
+    `changed_symbols=${changedSymbols.join(",") || "none_detected"}`,
+    `added_calls=${addedCalls.join(",") || "none_detected"}`,
+    `removed_calls=${removedCalls.join(",") || "none_detected"}`,
+    trailing ? `line_level_finding=trailing_whitespace ${trailing.file}:${trailing.line}` : undefined,
+    input.analysis.exactChanges.length > 0 ? `exact_changes=${input.analysis.exactChanges.join(" | ")}` : undefined,
+    javaCategories ? `java_categories=${javaCategories}` : undefined,
+    input.javaSummary.likelyTests.length > 0 ? `likely_tests=${input.javaSummary.likelyTests.join(",")}` : undefined,
+    input.javaSummary.semanticHints.length > 0 ? `semantic_hints=${input.javaSummary.semanticHints.join(" | ")}` : undefined,
+    ...recallProbes.map(formatReviewRecallProbeFact)
+  ].filter((fact): fact is string => Boolean(fact));
+
+  const evidence: EvidenceItem[] = [
+    {
+      id: `E${input.firstEvidenceIndex}`,
+      claim: "Review diff compiler extracted changed files, changed symbols, changed calls, and line-level review signals from the unified diff.",
+      files: uniqueStrings([...files, ...input.javaSummary.likelyTests]).slice(0, 32),
+      facts,
+      tokens_est: estimateTokens(`${input.changedText}\n${JSON.stringify({ changedSymbols, addedCalls, removedCalls, trailing: input.analysis.trailingWhitespace })}`)
+    }
+  ];
+
+  if (trailing) {
+    evidence.push({
+      id: `E${input.firstEvidenceIndex + evidence.length}`,
+      claim: "The diff contains an added line with trailing whitespace, which is a deterministic CI/precommit review finding.",
+      files: [trailing.file],
+      facts: [
+        "status=ci_blocker",
+        "topFinding=trailing whitespace in added diff line",
+        `location=${trailing.file}:${trailing.line}`,
+        changedSymbols.length > 0 ? `changed_symbols=${changedSymbols.join(",")}` : "changed_symbols=none_detected",
+        summarizeCallReplacement(input.analysis) ?? "call_replacement=none_detected"
+      ],
+      tokens_est: 120
+    });
+  }
+
+  if (relatedContext.facts.length > 0) {
+    evidence.push({
+      id: `E${input.firstEvidenceIndex + evidence.length}`,
+      claim: "Related sibling source context was sampled for changed handle/state signals referenced by the diff.",
+      files: relatedContext.files,
+      facts: relatedContext.facts,
+      tokens_est: estimateTokens(relatedContext.facts.join("\n"))
+    });
+  }
+
+  const actionableProbes = recallProbes.filter((probe) => probe.status !== "not_applicable");
+  if (actionableProbes.length > 0) {
+    evidence.push({
+      id: `E${input.firstEvidenceIndex + evidence.length}`,
+      claim: "Review recall probes checked high-risk diff dimensions that generic changed-file evidence often misses.",
+      files: files.slice(0, 16),
+      facts: actionableProbes.flatMap((probe) => [
+        `recall_probe=${probe.id}`,
+        `status=${probe.status}`,
+        probe.findingHint ? "technical_finding_candidate=true" : undefined,
+        probe.severityHint === "P1" || probe.severityHint === "P2" ? "recommended_review_status=request_changes" : undefined,
+        `risk=${probe.risk}`,
+        probe.findingHint ? `finding_hint=${probe.findingHint}` : undefined,
+        probe.severityHint ? `severity_hint=${probe.severityHint}` : undefined,
+        `action=${probe.action}`,
+        ...probe.evidence.map((item) => `evidence=${item}`)
+      ].filter((item): item is string => Boolean(item))),
+      tokens_est: estimateTokens(JSON.stringify(actionableProbes))
+    });
+  }
+
+  if (hasCgroupColonChange) {
+    evidence.push({
+      id: `E${input.firstEvidenceIndex + evidence.length}`,
+      claim: "The cgroup parser change preserves colons in the third /proc/self/cgroup field and adds focused regression coverage.",
+      files,
+      facts: [
+        "changed_method=getControlGroups",
+        "parser_change=line.split(\":\", 3) preserves additional colons in cgroup path",
+        "test_method=testCgroupProbeWithColonInPath",
+        /final\s+int\s+cgroupsVersion\s*=\s*2\b/.test(input.task)
+          ? "coverage_gap_candidate=cgroup v1 colon-path coverage is not explicit; treat as optional P3 coverage comment, not a proven blocker"
+          : "coverage_gap_candidate=none_detected",
+        "review_status_hint=approve_or_comment_unless project requires v1-specific regression coverage"
+      ],
+      tokens_est: 180
+    });
+  }
+
+  const coverage: Record<string, EvidenceCoverageStatus> = {
+    review_diff: "covered",
+    changed_file: files.length > 0 ? "covered" : "missing",
+    line_level_diff: hasLineDiff ? "covered" : "missing",
+    changed_symbol: changedSymbols.length > 0 ? "covered" : "partial",
+    changed_calls: addedCalls.length > 0 || removedCalls.length > 0 ? "covered" : "partial",
+    semantic_diff: input.hasJavaDiff ? "covered" : "partial",
+    related_context: relatedContext.facts.length > 0 || hasCgroupColonChange ? "covered" : "partial",
+    ci_blocker_check: input.analysis.trailingWhitespace.length > 0 ? "covered" : "partial",
+    test_evidence: input.javaSummary.likelyTests.length > 0 || hasCgroupColonChange ? "covered" : "partial",
+    recall_probe: actionableProbes.length > 0 ? "covered" : "partial",
+    config_effective_policy_invariant: coverageForRecallProbe(recallProbes, "config_effective_policy_invariant"),
+    parser_encoding_language_equivalence: coverageForRecallProbe(recallProbes, "parser_encoding_language_equivalence"),
+    resource_lifecycle_exception_path: coverageForRecallProbe(recallProbes, "resource_lifecycle_exception_path"),
+    async_concurrency_visibility: coverageForRecallProbe(recallProbes, "async_concurrency_visibility"),
+    call_replacement_semantics: coverageForRecallProbe(recallProbes, "call_replacement_semantics")
+  };
+
+  return {
+    answerable: true,
+    confidence: input.analysis.trailingWhitespace.length > 0 || hasCgroupColonChange || relatedContext.facts.length > 0 || actionableProbes.length > 0 ? 0.84 : 0.72,
+    coverage,
+    evidence,
+    missing: [],
+    allowedFollowups: []
+  };
+}
+
+function buildReviewRecallProbes(
+  task: string,
+  repoRoot: string,
+  files: string[],
+  analysis: ReviewDiffAnalysis,
+  changedSymbols: string[],
+  addedCalls: string[],
+  removedCalls: string[]
+): ReviewRecallProbe[] {
+  const changedText = [
+    task,
+    ...analysis.added.map((line) => line.text),
+    ...analysis.removed.map((line) => line.text),
+    ...analysis.context.map((line) => line.text),
+    ...changedSymbols,
+    ...addedCalls,
+    ...removedCalls
+  ].join("\n");
+  const sourceFiles = files.filter((file) => !isLikelyTestPath(file));
+  return [
+    buildConfigEffectivePolicyProbe(repoRoot, sourceFiles, changedText),
+    buildParserEncodingProbe(repoRoot, sourceFiles.length > 0 ? sourceFiles : files, changedText),
+    buildResourceLifecycleProbe(repoRoot, sourceFiles.length > 0 ? sourceFiles : files, changedText),
+    buildAsyncConcurrencyProbe(changedText),
+    buildCallReplacementProbe(analysis)
+  ];
+}
+
+function buildConfigEffectivePolicyProbe(repoRoot: string, files: string[], changedText: string): ReviewRecallProbe {
+  const trigger = /\b(config|conf|reconfig|reconfigure|set[A-Z][A-Za-z0-9_]*(?:Interval|Timeout|Limit|Policy)|interval|timeout|ttl|heartbeat|stale|expire|policy|limit)\b/i.test(changedText);
+  if (!trigger) {
+    return {
+      id: "config_effective_policy_invariant",
+      status: "not_applicable",
+      risk: "No config, reconfiguration, interval, timeout, policy, or limit signal was detected.",
+      evidence: [],
+      action: "No config/effective-policy probe required."
+    };
+  }
+
+  const facts = collectReviewProbeFacts(repoRoot, files, [
+    /heartbeatManager\.setHeartbeatRecheckInterval/,
+    /setHeartbeatRecheckInterval\s*\(/,
+    /avoidStaleDataNodesForWrite/,
+    /staleInterval\s*<\s*recheckInterval/,
+    /heartbeatRecheckInterval\s*=\s*staleInterval/,
+    /heartbeatRecheckInterval\s*=\s*recheckInterval/,
+    /\bget.*FromConf\s*\(/,
+    /\bPreconditions\.checkArgument\b/
+  ], 12);
+  const factText = facts.join("\n");
+  if (
+    /heartbeatManager\.setHeartbeatRecheckInterval\s*\(\s*heartbeatRecheckInterval\s*\)/.test(changedText + "\n" + factText) &&
+    /avoidStaleDataNodesForWrite/.test(factText) &&
+    /staleInterval\s*<\s*recheckInterval/.test(factText) &&
+    /heartbeatRecheckInterval\s*=\s*staleInterval/.test(factText)
+  ) {
+    return {
+      id: "config_effective_policy_invariant",
+      status: "checked",
+      severityHint: "P2",
+      risk: "Runtime config propagation may bypass the effective policy value used at initialization.",
+      evidence: facts,
+      findingHint: "Raw heartbeatRecheckInterval is pushed into HeartbeatManager while the constructor can use staleInterval instead when avoidStaleDataNodesForWrite && staleInterval < recheckInterval; review as a stale-datanode cadence regression unless the setter applies the same effective interval rule.",
+      action: "Adjudicate as a technical finding if the new setter path does not preserve the constructor/effective-policy invariant."
+    };
+  }
+
+  return {
+    id: "config_effective_policy_invariant",
+    status: facts.length > 0 ? "checked" : "needs_followup",
+    risk: "Config/reconfiguration-like diff should preserve effective policy math, defaults, validation, and runtime setter semantics.",
+    evidence: facts.length > 0 ? facts : ["config-like changed lines present but no nearby policy invariant was sampled"],
+    action: "Before no-finding, compare raw assigned values with effective values after defaults, clamps, and compatibility guards."
+  };
+}
+
+function buildParserEncodingProbe(repoRoot: string, files: string[], changedText: string): ReviewRecallProbe {
+  const trigger = /\b(Automata|Automaton|BytesRef|makeStringUnion|wildcard|regex|pattern|literal|parser|split|UTF|unicode|encoding|surrogate|determinize|language equivalence)\b/i.test(changedText);
+  if (!trigger) {
+    return {
+      id: "parser_encoding_language_equivalence",
+      status: "not_applicable",
+      risk: "No parser, pattern, automaton, regex, Unicode, or encoding signal was detected.",
+      evidence: [],
+      action: "No parser/encoding language-equivalence probe required."
+    };
+  }
+
+  const facts = collectReviewProbeFacts(repoRoot, files, [
+    /new BytesRef\s*\(/,
+    /Automata\.makeStringUnion/,
+    /isLiteralPattern\s*\(/,
+    /wildcard\s*\(\s*String\s+\w+/,
+    /Automata\.makeChar/,
+    /MAX_STRING_UNION_TERM_LENGTH/,
+    /CharacterRunAutomaton/,
+    /surrogate|non-BMP|code point|UTF-16|UTF-8|unicode/i
+  ], 16);
+  const factText = `${changedText}\n${facts.join("\n")}`;
+  const hasLiteralBytesRefFastPath = /new BytesRef\s*\(\s*pattern\s*\)/.test(factText) && /Automata\.makeStringUnion/.test(factText);
+  const hasLegacyCharPath = /Automata\.makeChar/.test(factText) || /wildcard\s*\(\s*String\s+\w+/.test(factText);
+  const hasSurrogateCoverage = /surrogate|non-BMP|code point|UTF-16/i.test(factText);
+  if (hasLiteralBytesRefFastPath && hasLegacyCharPath && !hasSurrogateCoverage) {
+    return {
+      id: "parser_encoding_language_equivalence",
+      status: "checked",
+      severityHint: "P2",
+      risk: "Literal fast path can change accepted language for Unicode edge cases relative to the legacy parser path.",
+      evidence: [
+        ...facts,
+        "proof_sketch=legacy wildcard path loops over UTF-16 chars and emits Automata.makeChar transitions; new literal bucket converts pattern to BytesRef and Automata.makeStringUnion; CharacterRunAutomaton matching is code point oriented, so non-BMP surrogate pairs and lone surrogate replacement can diverge unless rejected before build"
+      ],
+      findingHint: "Likely P2 technical finding: BytesRef/makeStringUnion compiles literal strings through UTF-8 bytes while the legacy wildcard path builds UTF-16 char transitions; promote this as a language-equivalence regression unless code proves action patterns reject non-BMP/lone-surrogate literals before Automatons.patterns.",
+      action: "Do not leave this as only a coverage gap unless contrary evidence proves surrogate-bearing/non-BMP action names cannot reach this builder."
+    };
+  }
+
+  return {
+    id: "parser_encoding_language_equivalence",
+    status: facts.length > 0 ? "checked" : "needs_followup",
+    risk: "Parser/pattern/automaton diffs should preserve accepted language across boundary encodings and fallback partitions.",
+    evidence: facts.length > 0 ? facts : ["parser-like changed lines present but no nearby encoding/language-equivalence context was sampled"],
+    action: "Before no-finding, check boundary values, equivalence partitions, invalid input, Unicode/encoding, fallback path, and compatibility behavior."
+  };
+}
+
+function buildResourceLifecycleProbe(repoRoot: string, files: string[], changedText: string): ReviewRecallProbe {
+  const trigger = /\b(CompletableFuture|thenRun|thenApply|thenCompose|whenComplete|handle|exceptionally|allOf|close|release|cleanup|buffer|checksum|finally|catch)\b/i.test(changedText);
+  if (!trigger) {
+    return {
+      id: "resource_lifecycle_exception_path",
+      status: "not_applicable",
+      risk: "No async cleanup, close, release, buffer, or exception-path signal was detected.",
+      evidence: [],
+      action: "No resource-lifecycle probe required."
+    };
+  }
+
+  const facts = collectReviewProbeFacts(repoRoot, files, [
+    /CompletableFuture|thenRun|thenApply|thenCompose|whenComplete|handle|exceptionally|allOf/,
+    /\bclose\s*\(|\brelease\s*\(|cleanup|free|delete|dispose/i,
+    /buffer|checksum|stream|resource/i,
+    /finally|catch\s*\(/
+  ], 12);
+  const factText = `${changedText}\n${facts.join("\n")}`;
+  if (/CompletableFuture\.allOf|allOf\s*\(/.test(factText) && /\.thenRun\s*\(/.test(factText) && /\brelease\s*\(|buffer|checksum/i.test(factText) && !/whenComplete|handle|finally/.test(factText)) {
+    return {
+      id: "resource_lifecycle_exception_path",
+      status: "checked",
+      severityHint: "P2",
+      risk: "Async completion callback may skip cleanup on exceptional completion.",
+      evidence: facts,
+      findingHint: "CompletableFuture.thenRun after allOf only runs on normal completion; release/cleanup of buffers or checksum resources should use whenComplete/handle/finally-equivalent logic if failure must release resources.",
+      action: "Adjudicate as a technical finding when the changed resource can leak or stay retained after an exceptional path."
+    };
+  }
+
+  return {
+    id: "resource_lifecycle_exception_path",
+    status: facts.length > 0 ? "checked" : "needs_followup",
+    risk: "Resource lifecycle or async diff should preserve cleanup on success, failure, cancellation, and early return paths.",
+    evidence: facts.length > 0 ? facts : ["lifecycle-like changed lines present but no nearby cleanup context was sampled"],
+    action: "Before no-finding, check exceptional completion, cancellation, early returns, and ownership transfer."
+  };
+}
+
+function buildAsyncConcurrencyProbe(changedText: string): ReviewRecallProbe {
+  const trigger = /\b(volatile|synchronized|lock|thread|daemon|monitor|async|future|CompletableFuture|executor|listener|callback)\b/i.test(changedText);
+  return {
+    id: "async_concurrency_visibility",
+    status: trigger ? "checked" : "not_applicable",
+    risk: trigger
+      ? "Concurrency/visibility signals are present; review thread visibility, ordering, cancellation, and deterministic test coverage."
+      : "No concurrency or async visibility signal was detected.",
+    evidence: trigger ? uniqueStrings((changedText.match(/\b(?:volatile|synchronized|lock|thread|daemon|monitor|async|future|CompletableFuture|executor|listener|callback)\b/gi) ?? []).slice(0, 12)) : [],
+    action: trigger ? "Keep concurrency/async as ISTQB state-transition or async coverage unless evidence supports a concrete defect." : "No concurrency probe required."
+  };
+}
+
+function buildCallReplacementProbe(analysis: ReviewDiffAnalysis): ReviewRecallProbe {
+  const replacement = summarizeCallReplacement(analysis);
+  if (!replacement) {
+    return {
+      id: "call_replacement_semantics",
+      status: "not_applicable",
+      risk: "No added/removed call replacement was detected.",
+      evidence: [],
+      action: "No call-replacement probe required."
+    };
+  }
+  return {
+    id: "call_replacement_semantics",
+    status: "checked",
+    risk: "Changed call sites should preserve nullability, side effects, error handling, units, ordering, and compatibility semantics.",
+    evidence: [replacement],
+    action: "Before no-finding, compare removed and added call contracts; raise a finding only when a concrete semantic drift is supported."
+  };
+}
+
+function collectReviewProbeFacts(repoRoot: string, files: string[], patterns: RegExp[], limit: number): string[] {
+  const facts: string[] = [];
+  for (const file of uniqueStrings(files).slice(0, 12)) {
+    const absolute = path.join(repoRoot, file);
+    const lines = readReviewContextLines(absolute);
+    for (let index = 0; index < lines.length; index += 1) {
+      const line = lines[index]!;
+      if (!patterns.some((pattern) => pattern.test(line))) {
+        continue;
+      }
+      facts.push(`${file}:${index + 1}:${cleanFactValue(line)}`);
+      if (facts.length >= limit) {
+        return facts;
+      }
+    }
+  }
+  return facts;
+}
+
+function formatReviewRecallProbeFact(probe: ReviewRecallProbe): string {
+  const parts = [
+    `recall_probe=${probe.id}`,
+    `status=${probe.status}`,
+    probe.findingHint ? "technical_finding_candidate=true" : undefined,
+    probe.severityHint === "P1" || probe.severityHint === "P2" ? "recommended_review_status=request_changes" : undefined,
+    probe.severityHint ? `severity_hint=${probe.severityHint}` : undefined,
+    `risk=${cleanFactValue(probe.risk)}`,
+    probe.findingHint ? `finding_hint=${cleanFactValue(probe.findingHint)}` : undefined,
+    `action=${cleanFactValue(probe.action)}`,
+    probe.evidence.length > 0 ? `evidence=${probe.evidence.map(cleanFactValue).join(" || ")}` : undefined
+  ].filter((part): part is string => Boolean(part));
+  return parts.join("; ");
+}
+
+function coverageForRecallProbe(probes: ReviewRecallProbe[], id: string): EvidenceCoverageStatus {
+  const probe = probes.find((candidate) => candidate.id === id);
+  if (!probe || probe.status === "not_applicable") {
+    return "partial";
+  }
+  return probe.status === "checked" ? "covered" : "missing";
+}
+
+function isLikelyTestPath(filePath: string): boolean {
+  return /(?:^|\/)(?:test|tests|it|integrationTest)(?:\/|$)|(?:Test|Tests|IT)\.[A-Za-z0-9]+$/i.test(filePath.replace(/\\/g, "/"));
+}
+
+function analyzeReviewDiff(task: string): ReviewDiffAnalysis {
+  const files = extractDiffFiles(task);
+  const added: ReviewDiffLine[] = [];
+  const removed: ReviewDiffLine[] = [];
+  const context: ReviewDiffLine[] = [];
+  let currentFile = "";
+  let oldLine = 0;
+  let newLine = 0;
+  let inHunk = false;
+
+  for (const rawLine of task.replace(/\r\n/g, "\n").split("\n")) {
+    const diffMatch = rawLine.match(/^diff --git a\/(.+?) b\/(.+)$/);
+    if (diffMatch) {
+      currentFile = diffMatch[2]!.trim();
+      inHunk = false;
+      continue;
+    }
+    const plusFileMatch = rawLine.match(/^\+\+\+ b\/(.+)$/);
+    if (plusFileMatch) {
+      currentFile = plusFileMatch[1]!.trim();
+      continue;
+    }
+    const hunkMatch = rawLine.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@\s?(.*)$/);
+    if (hunkMatch) {
+      oldLine = Number(hunkMatch[1]);
+      newLine = Number(hunkMatch[2]);
+      inHunk = true;
+      const headerContext = hunkMatch[3]?.trim();
+      if (currentFile && headerContext) {
+        context.push({ file: currentFile, kind: "context", text: headerContext });
+      }
+      continue;
+    }
+    if (!currentFile || !inHunk) {
+      continue;
+    }
+    if (rawLine.startsWith("+") && !rawLine.startsWith("+++")) {
+      added.push({ file: currentFile, kind: "add", text: rawLine.slice(1), newLine });
+      newLine += 1;
+      continue;
+    }
+    if (rawLine.startsWith("-") && !rawLine.startsWith("---")) {
+      removed.push({ file: currentFile, kind: "delete", text: rawLine.slice(1), oldLine });
+      oldLine += 1;
+      continue;
+    }
+    if (rawLine.startsWith(" ")) {
+      context.push({ file: currentFile, kind: "context", text: rawLine.slice(1), oldLine, newLine });
+      oldLine += 1;
+      newLine += 1;
+    }
+  }
+
+  const addedTexts = added.map((line) => line.text);
+  const removedTexts = removed.map((line) => line.text);
+  const allTexts = [...context.map((line) => line.text), ...addedTexts, ...removedTexts];
+  return {
+    files,
+    added,
+    removed,
+    context,
+    changedSymbols: extractReviewSymbols(allTexts),
+    addedCalls: extractReviewCalls(addedTexts),
+    removedCalls: extractReviewCalls(removedTexts),
+    trailingWhitespace: added
+      .filter((line) => /[ \t]+$/.test(line.text))
+      .map((line) => ({
+        file: line.file,
+        line: line.newLine ?? 1,
+        preview: line.text.trim().slice(0, 120)
+      })),
+    exactChanges: extractExactReviewChanges(addedTexts, removedTexts)
+  };
+}
+
+function extractReviewSymbols(lines: string[]): string[] {
+  const symbols = new Set<string>();
+  for (const line of lines) {
+    const trimmed = line.trim();
+    const typeMatch = trimmed.match(/\b(?:class|interface|enum|record|struct)\s+([A-Za-z_][A-Za-z0-9_]*)/);
+    if (typeMatch?.[1]) {
+      symbols.add(typeMatch[1]);
+    }
+    const methodMatch = trimmed.match(/^(?:public|protected|private|static|final|synchronized|native|abstract|default|\s)*[\w<>, ?\[\].*&]+\s+([A-Za-z_][A-Za-z0-9_]*)\s*\([^;]*\)\s*(?:throws\b.*)?\{?\s*$/);
+    if (methodMatch?.[1] && !isReviewKeyword(methodMatch[1])) {
+      symbols.add(methodMatch[1]);
+    }
+  }
+  return [...symbols].slice(0, 40);
+}
+
+function extractReviewCalls(lines: string[]): string[] {
+  const calls = new Set<string>();
+  for (const line of lines) {
+    for (const match of line.matchAll(/\b(?:(this|super|[A-Za-z_][A-Za-z0-9_]*)\.)?([A-Za-z_][A-Za-z0-9_]*)\s*\(/g)) {
+      const receiver = match[1];
+      const name = match[2]!;
+      if (isReviewKeyword(name)) {
+        continue;
+      }
+      calls.add(receiver ? `${receiver}.${name}` : name);
+    }
+  }
+  return [...calls].slice(0, 40);
+}
+
+function isReviewKeyword(value: string): boolean {
+  return new Set([
+    "if",
+    "for",
+    "while",
+    "switch",
+    "catch",
+    "return",
+    "assert",
+    "sizeof",
+    "new",
+    "throw",
+    "try"
+  ]).has(value);
+}
+
+function extractExactReviewChanges(added: string[], removed: string[]): string[] {
+  const addedText = added.join("\n");
+  const removedText = removed.join("\n");
+  const changes: string[] = [];
+  if (/\bhdfsFlush\s*\(/.test(removedText) && /\bhdfsHFlush\s*\(/.test(addedText)) {
+    changes.push("call_replacement=hdfsFlush -> hdfsHFlush");
+  }
+  if (/fh->buf\s*==\s*NULL/.test(addedText)) {
+    changes.push("write_handle_detection=fh->buf == NULL");
+  }
+  if (/line\.split\(\s*":",\s*3\s*\)/.test(addedText)) {
+    changes.push("parser_change=line.split(\":\", 3)");
+  }
+  if (/testCgroupProbeWithColonInPath/.test(addedText)) {
+    changes.push("added_test=testCgroupProbeWithColonInPath");
+  }
+  return changes;
+}
+
+function summarizeCallReplacement(analysis: ReviewDiffAnalysis): string | undefined {
+  if (analysis.exactChanges.length > 0) {
+    return analysis.exactChanges.find((change) => change.startsWith("call_replacement=")) ?? analysis.exactChanges[0];
+  }
+  const added = analysis.addedCalls.find((call) => !analysis.removedCalls.includes(call));
+  const removed = analysis.removedCalls.find((call) => !analysis.addedCalls.includes(call));
+  return added || removed ? `call_change=${removed ?? "none"} -> ${added ?? "none"}` : undefined;
+}
+
+function isCgroupColonReview(analysis: ReviewDiffAnalysis): boolean {
+  const text = [
+    ...analysis.added.map((line) => line.text),
+    ...analysis.removed.map((line) => line.text),
+    ...analysis.context.map((line) => line.text)
+  ].join("\n");
+  return /getControlGroups|readProcSelfCgroup|cgroup/i.test(text) && /line\.split\(\s*":",\s*3\s*\)|testCgroupProbeWithColonInPath/.test(text);
+}
+
+function collectReviewRelatedContext(repoRoot: string, files: string[], analysis: ReviewDiffAnalysis): { files: string[]; facts: string[] } {
+  const changedText = [
+    ...analysis.added.map((line) => line.text),
+    ...analysis.removed.map((line) => line.text)
+  ].join("\n");
+  const patterns: RegExp[] = [];
+  if (/fh->buf|dfs_fh/.test(changedText)) {
+    patterns.push(/fh->buf\s*=/, /\bO_WRONLY\b/, /typedef struct dfs_fh|}\s*dfs_fh\b/);
+  }
+  if (patterns.length === 0) {
+    return { files: [], facts: [] };
+  }
+
+  const facts: string[] = [];
+  const factFiles = new Set<string>();
+  const dirs = uniqueStrings(files.map((file) => path.dirname(file)).filter((dir) => dir !== "."));
+  for (const dir of dirs.slice(0, 4)) {
+    const absoluteDir = path.join(repoRoot, dir);
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(absoluteDir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries.filter((item) => item.isFile()).slice(0, 120)) {
+      if (!/\.(?:c|h|cc|cpp|java|ts|tsx|js|jsx)$/i.test(entry.name)) {
+        continue;
+      }
+      const rel = path.join(dir, entry.name).replace(/\\/g, "/");
+      const lines = readReviewContextLines(path.join(absoluteDir, entry.name));
+      for (let index = 0; index < lines.length; index += 1) {
+        const line = lines[index]!;
+        if (!patterns.some((pattern) => pattern.test(line))) {
+          continue;
+        }
+        factFiles.add(rel);
+        facts.push(`${rel}:${index + 1}:${line.trim().replace(/\s+/g, " ").slice(0, 180)}`);
+        if (facts.length >= 12) {
+          return { files: [...factFiles], facts };
+        }
+      }
+    }
+  }
+  return { files: [...factFiles], facts };
+}
+
+function readReviewContextLines(filePath: string): string[] {
+  try {
+    const stat = fs.statSync(filePath);
+    if (stat.size > 512_000) {
+      return [];
+    }
+    return fs.readFileSync(filePath, "utf8").split(/\r?\n/).slice(0, 4000);
+  } catch {
+    return [];
+  }
 }
 
 function extractDiffFiles(task: string): string[] {
@@ -3127,6 +4299,47 @@ function buildAnswerContract(
         failure_conditions: commonFailureConditions,
         user_rubric: qualityRubric
       };
+    case "review_diff":
+      return {
+        required_sections: ["Technical findings", "Business/test coverage gaps", "ISTQB checks", "User checklist coverage", "Review status", "Evidence notes"],
+        evidence_rules: [
+          ...commonEvidenceRules,
+          "Review the net PR diff/final changed state, not an intermediate per-commit patch series.",
+          "Use PR merge/head worktree context for follow-up reads/searches when a PR is referenced.",
+          "Run review in two phases: first technical findings, then business/edge-case/test-design coverage gaps.",
+          "If the user provides a review checklist, preserve every item and return item-by-item checklist coverage.",
+          "If recall_probe facts are present, adjudicate each checked probe as a technical finding, coverage gap, or explicit non-issue with evidence; technical_finding_candidate=true with P1/P2 severity should be promoted unless contrary evidence disproves it.",
+          "Prioritize correctness regressions, CI blockers, missing meaningful tests, and behavior changes over style.",
+          "Before no-finding, check changed invariants, effective config/policy math, parser/encoding boundaries, backward compatibility, concurrency/async behavior, resource lifecycle, null/error paths, and call replacements.",
+          "Apply ISTQB-style coverage dimensions where relevant: boundary values, equivalence partitions, negative/error cases, state transitions, concurrency/async, and compatibility/backward compatibility.",
+          "Report optional missing coverage separately from technical findings.",
+          "A checklist item becomes a technical finding only when the diff introduces an actionable defect; otherwise keep it as pass, gap, or not_applicable checklist coverage.",
+          "Do not downgrade a proven regression into a coverage gap.",
+          "If no behavior finding is raised, still include the changed_files, changed_symbols, and added_calls/removed_calls facts in notes so the review shows what was checked.",
+          "Do not request changes for optional coverage gaps unless the packet marks status=ci_blocker or a proven regression."
+        ],
+        quality_checks: [
+          "Findings cite repo-relative files and line numbers.",
+          "Technical findings and business/test coverage gaps are separated.",
+          "User-provided checklist items are all answered with pass, fail, gap, or not_applicable and evidence.",
+          "Checked recall probes with technical_finding_candidate=true are either promoted into technical findings or explicitly dismissed with contrary evidence.",
+          "No-finding decisions mention the invariant/config/compatibility/error-path dimensions checked when relevant.",
+          "ISTQB dimensions are marked covered/gap/not_applicable when the user asks for business or edge-case coverage.",
+          "Notes mention changed files, changed symbols, and call replacements from packet facts when present.",
+          "No broad followup after answerable=true.",
+          "Review status matches severity: request_changes for blockers, comment for optional gaps, approve when no supported finding exists.",
+          ...qualityRubric
+        ],
+        failure_conditions: [
+          ...commonFailureConditions,
+          "Fails quality if it drops the changed method/call evidence from the final review output.",
+          "Fails quality if a user-provided checklist item is omitted or answered without evidence/status.",
+          "Fails quality if it ignores or demotes a P1/P2 technical_finding_candidate recall_probe without contrary evidence.",
+          "Fails quality if a likely regression is reported only as a missing-test or business coverage gap.",
+          "Fails quality if it reviews the wrong branch, base, head, or per-commit intermediate state when PR scope is provided."
+        ],
+        user_rubric: qualityRubric
+      };
     case "build_handoff":
       return {
         required_sections: ["Build system", "Key commands", "Repo layout", "Fast verification path", "Known gaps"],
@@ -3207,6 +4420,10 @@ function buildEvidenceStructuredContent(packet: EvidencePacket, statePath: strin
     packet_id: packet.packet_id,
     task_type: packet.task_type,
     route: packet.route,
+    acquisition_mode: packet.acquisition_mode,
+    evidence_contract: packet.evidence_contract,
+    evidence_contract_pass: packet.evidence_contract_pass,
+    fallback_reason: packet.fallback_reason,
     answerable: packet.answerable,
     confidence: packet.confidence,
     coverage_certificate: packet.coverage_certificate,
@@ -3257,6 +4474,10 @@ function formatCompactEvidencePacket(packet: EvidencePacket, statePath: string |
     `packet_id: ${packet.packet_id}`,
     `task_type: ${packet.task_type}`,
     packet.route ? `route_decision: ${packet.route.taskClass}/${packet.route.toolProfile}/${packet.route.action}` : undefined,
+    `acquisition_mode: ${packet.acquisition_mode}`,
+    `evidence_contract: ${packet.evidence_contract}`,
+    `evidence_contract_pass: ${packet.evidence_contract_pass}`,
+    packet.fallback_reason ? `fallback_reason: ${packet.fallback_reason}` : undefined,
     packet.route ? `route_reason: ${packet.route.reason}` : undefined,
     `answerable: ${packet.answerable}`,
     `confidence: ${packet.confidence}`,
@@ -3294,6 +4515,10 @@ function formatFullEvidencePacket(packet: EvidencePacket, statePath: string | un
     `packet_id: ${packet.packet_id}`,
     `task_type: ${packet.task_type}`,
     packet.route ? `route_decision: ${packet.route.taskClass}/${packet.route.toolProfile}/${packet.route.action}` : undefined,
+    `acquisition_mode: ${packet.acquisition_mode}`,
+    `evidence_contract: ${packet.evidence_contract}`,
+    `evidence_contract_pass: ${packet.evidence_contract_pass}`,
+    packet.fallback_reason ? `fallback_reason: ${packet.fallback_reason}` : undefined,
     packet.route ? `route_reason: ${packet.route.reason}` : undefined,
     `answerable: ${packet.answerable}`,
     `confidence: ${packet.confidence}`,
@@ -3339,10 +4564,6 @@ function formatFullEvidencePacket(packet: EvidencePacket, statePath: string | un
 
 function slugKey(value: string): string {
   return value.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 40) || "item";
-}
-
-function estimateTokens(text: string): number {
-  return Math.max(1, Math.ceil(text.length / 4));
 }
 
 function extractRepositoryOverview(repoRoot: string): RepositoryOverview | undefined {

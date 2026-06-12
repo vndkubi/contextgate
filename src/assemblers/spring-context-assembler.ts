@@ -1,3 +1,5 @@
+import { estimateTokensSaved } from "../token-estimator.js";
+
 export interface SpringContextBean {
   name: string;
   type: string;
@@ -34,7 +36,7 @@ export function assembleSpringContext(input: string): SpringContextAssembly {
     ...assemblyBase,
     originalChars: normalized.length,
     assembledChars: compact.length,
-    estimatedTokensSaved: Math.ceil(Math.max(0, normalized.length - compact.length) / 4)
+    estimatedTokensSaved: estimateTokensSaved(normalized.length, compact.length, { kind: "json" })
   };
 }
 
